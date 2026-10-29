@@ -92,6 +92,8 @@ Needs `clang`, `lld`, `bison`, `flex` and `autoconf`.
 - **Microphone far too sensitive**: check `pactl list sources`. If *Base Volume*
   is low (e.g. 10%) and the volume is high, the extra percentage is hardware
   boost. Lower it: `pactl set-source-volume @DEFAULT_SOURCE@ 30%`.
+- **Generic icon in the menu (Omarchy)**: the shell indexes icons when it
+  starts; run `omarchy-restart-shell` after installing.
 - **Logs**: `~/.local/share/tiktok-live-studio/prefix/drive_c/users/steamuser/AppData/Roaming/TikTok LIVE Studio/logs/`.
 - **Wine traces**: `WINEDEBUG=+mmdevapi tiktok-live-studio`.
 
@@ -136,4 +138,6 @@ DLL al prefijo y la carga solo para esta app, sin modificar GE-Proton.
 - **Micrófono demasiado sensible**: si en `pactl list sources` el *Base Volume*
   es bajo (por ejemplo 10 %) y el volumen alto, ese extra es ganancia de
   hardware. Bájalo: `pactl set-source-volume @DEFAULT_SOURCE@ 30%`.
+- **Icono genérico en el menú (Omarchy)**: la shell indexa los iconos al
+  arrancar; ejecuta `omarchy-restart-shell` después de instalar.
 - **Captura de juegos y ventanas**: sin probar.
