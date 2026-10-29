@@ -6,4 +6,4 @@ Exec=tiktok-live-studio
 Icon=tiktok-live-studio
 Terminal=false
 Categories=AudioVideo;Video;Network;
-StartupWMClass=tiktok live studio launcher.exe
+StartupWMClass=steam_app_default

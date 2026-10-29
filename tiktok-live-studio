@@ -8,8 +8,8 @@
 #   tiktok-live-studio winetricks ...  ejecuta winetricks en el prefijo
 #   tiktok-live-studio reset           borra el prefijo (se pierde la sesión)
 #
-# Variables: TTLS_PREFIX (ruta del prefijo), PROTONPATH (por defecto GE-Proton11-11),
-#            TTLS_MMDEVAPI (mmdevapi.dll parcheada).
+# Variables: TTLS_PREFIX (ruta del prefijo), PROTONPATH (por defecto GE-Proton11-11,
+#            que se descarga si falta), TTLS_MMDEVAPI (mmdevapi.dll parcheada).
 set -euo pipefail
 
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/tiktok-live-studio"
@@ -17,8 +17,11 @@ export WINEPREFIX="${TTLS_PREFIX:-$DATA_DIR/prefix}"
 export GAMEID="${GAMEID:-umu-default}"
 # sscronet.dll importa SetPerTcp6ConnectionEStats, que Wine añadió en 10.15;
 # UMU-Proton 10.0 no la tiene y la app aborta al iniciar. La versión queda fija
-# porque mmdevapi.dll está compilada contra el Wine de esta release.
-export PROTONPATH="${PROTONPATH:-GE-Proton11-11}"
+# porque mmdevapi.dll está compilada contra el Wine de esta release. umu solo
+# descarga "la última", así que esta se descarga aquí.
+PROTON_RELEASE=GE-Proton11-11
+PROTON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/Steam/compatibilitytools.d/$PROTON_RELEASE-x86_64"
+PROTON_URL="https://github.com/GloriousEggroll/proton-ge-custom/releases/download/$PROTON_RELEASE/$PROTON_RELEASE-x86_64"
 # mmdevapi de GE-Proton11-11 con IDeviceTopology/IConnector/IPart implementados:
 # sin ellos MediaSDK descarta todos los dispositivos de audio ("No audio found").
 MMDEVAPI_DLL="${TTLS_MMDEVAPI:-/usr/share/tiktok-live-studio/mmdevapi.dll}"
@@ -63,6 +66,33 @@ download() {
         sleep 3
     done
     return 1
+}
+
+ensure_proton() {
+    local tmp sum
+
+    if [[ -n "${PROTONPATH:-}" ]]; then
+        export PROTONPATH
+        return 0
+    fi
+    if [[ ! -f "$PROTON_DIR/toolmanifest.vdf" ]]; then
+        tmp=$(mktemp -d)
+        echo "Descargando $PROTON_RELEASE ..." >&2
+        if [[ -t 2 ]] || ! command -v zenity >/dev/null; then
+            download "$PROTON_URL.tar.gz" "$tmp/proton.tar.gz" >&2 || die "No se pudo descargar $PROTON_RELEASE."
+        else
+            download "$PROTON_URL.tar.gz" "$tmp/proton.tar.gz" -sS | zenity --progress --pulsate --auto-close --no-cancel \
+                --title="TikTok LIVE Studio" --text="Descargando $PROTON_RELEASE ..." 2>/dev/null
+            [[ ${PIPESTATUS[0]} -eq 0 ]] || die "No se pudo descargar $PROTON_RELEASE."
+        fi
+        sum=$(curl -fsSL "$PROTON_URL.sha512sum" | cut -d' ' -f1) || die "No se pudo descargar el SHA-512 de $PROTON_RELEASE."
+        [[ "$(sha512sum "$tmp/proton.tar.gz" | cut -d' ' -f1)" == "$sum" ]] || die "El SHA-512 de $PROTON_RELEASE no coincide."
+        mkdir -p "$(dirname "$PROTON_DIR")"
+        tar -xzf "$tmp/proton.tar.gz" -C "$(dirname "$PROTON_DIR")"
+        rm -rf "$tmp"
+        [[ -f "$PROTON_DIR/toolmanifest.vdf" ]] || die "$PROTON_RELEASE no quedó en $PROTON_DIR."
+    fi
+    export PROTONPATH="$PROTON_DIR"
 }
 
 # Descarga el instalador completo más reciente desde el servidor de
@@ -138,12 +168,12 @@ run_app() {
 }
 
 case "${1:-}" in
-    install) shift; install_app "${1:-}" ;;
-    winecfg) exec umu-run winecfg ;;
-    winetricks) shift; exec umu-run winetricks "$@" ;;
+    install) shift; ensure_proton; install_app "${1:-}" ;;
+    winecfg) ensure_proton; exec umu-run winecfg ;;
+    winetricks) shift; ensure_proton; exec umu-run winetricks "$@" ;;
     reset)
         read -rp "¿Borrar $WINEPREFIX? [s/N] " ans
         if [[ "$ans" == [sS] ]]; then rm -rf -- "$WINEPREFIX"; echo "Prefijo borrado."; fi ;;
     -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' ;;
-    *) run_app "${1:-}" ;;
+    *) ensure_proton; run_app "${1:-}" ;;
 esac
