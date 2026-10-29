@@ -1,0 +1,536 @@
+--- a/dlls/mmdevapi/devenum.c
++++ b/dlls/mmdevapi/devenum.c
+@@ -272,16 +272,30 @@
+ 
+ static const IPropertyBagVtbl PB_Vtbl;
+ 
++/* Every endpoint is presented as connected to the single connector of a
++ * software audio adapter, so that apps can walk endpoint -> adapter. */
+ typedef struct IConnectorImpl {
+     IConnector IConnector_iface;
++    IPart IPart_iface;
+     LONG ref;
++
++    BOOL adapter;
++    EDataFlow flow;
++    WCHAR *endpoint_id;
+ } IConnectorImpl;
+ 
+ typedef struct IDeviceTopologyImpl {
+     IDeviceTopology IDeviceTopology_iface;
+     LONG ref;
++
++    BOOL adapter;
++    EDataFlow flow;
++    WCHAR *endpoint_id;
+ } IDeviceTopologyImpl;
+ 
++static HRESULT Connector_Create(BOOL adapter, EDataFlow flow, const WCHAR *endpoint_id, IConnector **ppv);
++static HRESULT Topology_Create(BOOL adapter, EDataFlow flow, const WCHAR *endpoint_id, IDeviceTopology **ppv);
++
+ static HRESULT MMDevPropStore_Create(MMDevice *This, DWORD access, IPropertyStore **ppv);
+ 
+ static inline MMDevPropStore *impl_from_IPropertyStore(IPropertyStore *iface)
+@@ -3919,6 +3933,53 @@
+     PB_Write
+ };
+ 
++/* Software adapter that every endpoint is connected to, in the format Windows
++ * uses for KS filter device ids. */
++static const WCHAR adapter_idW[] = L"{2}.\\\\?\\root#media#0000#{6994ad04-93ef-11d0-a3cc-00a0c9223196}\\wave";
++
++DEFINE_GUID(mmdevapi_KSNODETYPE_SPEAKER,    0xdff21ce1, 0xf70f, 0x11d0, 0xb9, 0x17, 0x00, 0xa0, 0xc9, 0x22, 0x31, 0x96);
++DEFINE_GUID(mmdevapi_KSNODETYPE_MICROPHONE, 0xdff21be1, 0xf70f, 0x11d0, 0xb9, 0x17, 0x00, 0xa0, 0xc9, 0x22, 0x31, 0x96);
++
++static HRESULT return_string(const WCHAR *str, WCHAR **out)
++{
++    if (!out)
++        return E_POINTER;
++    *out = CoTaskMemAlloc((wcslen(str) + 1) * sizeof(WCHAR));
++    if (!*out)
++        return E_OUTOFMEMORY;
++    wcscpy(*out, str);
++    return S_OK;
++}
++
++static const WCHAR *part_device_id(BOOL adapter, const WCHAR *endpoint_id)
++{
++    return adapter ? adapter_idW : endpoint_id;
++}
++
++static UINT connector_local_id(BOOL adapter)
++{
++    return adapter ? 0x00010001 : 0x00010000;
++}
++
++static HRESULT connector_global_id(BOOL adapter, const WCHAR *endpoint_id, WCHAR **out)
++{
++    const WCHAR *devid = part_device_id(adapter, endpoint_id);
++    size_t len = wcslen(devid) + 10;
++
++    if (!out)
++        return E_POINTER;
++    *out = CoTaskMemAlloc(len * sizeof(WCHAR));
++    if (!*out)
++        return E_OUTOFMEMORY;
++    swprintf(*out, len, L"%s/%08x", devid, connector_local_id(adapter));
++    return S_OK;
++}
++
++static inline IConnectorImpl *impl_from_IPart(IPart *iface)
++{
++    return CONTAINING_RECORD(iface, IConnectorImpl, IPart_iface);
++}
++
+ static HRESULT WINAPI Connector_QueryInterface(IConnector *iface, REFIID riid, void **ppv)
+ {
+     IConnectorImpl *This = impl_from_IConnector(iface);
+@@ -3930,6 +3991,8 @@
+     if (IsEqualIID(riid, &IID_IUnknown) ||
+         IsEqualIID(riid, &IID_IConnector))
+         *ppv = &This->IConnector_iface;
++    else if (IsEqualIID(riid, &IID_IPart))
++        *ppv = &This->IPart_iface;
+     else {
+         *ppv = NULL;
+         return E_NOINTERFACE;
+@@ -3955,26 +4018,45 @@
+     TRACE("(%p) new ref %lu\n", This, ref);
+ 
+     if (!ref)
++    {
++        free(This->endpoint_id);
+         HeapFree(GetProcessHeap(), 0, This);
++    }
+ 
+     return ref;
+ }
+ 
+ static HRESULT WINAPI Connector_GetType(
+-    IConnector *This,
++    IConnector *iface,
+     ConnectorType *pType)
+ {
+-    FIXME("(%p) - partial stub\n", This);
+-    *pType = Physical_Internal;
++    IConnectorImpl *This = impl_from_IConnector(iface);
++    TRACE("(%p)->(%p)\n", This, pType);
++
++    if (!pType)
++        return E_POINTER;
++
++    *pType = This->adapter ? Software_IO : Physical_Internal;
+     return S_OK;
+ }
+ 
+ static HRESULT WINAPI Connector_GetDataFlow(
+-    IConnector *This,
++    IConnector *iface,
+     DataFlow *pFlow)
+ {
+-    FIXME("(%p) - stub\n", This);
+-    return E_NOTIMPL;
++    IConnectorImpl *This = impl_from_IConnector(iface);
++    TRACE("(%p)->(%p)\n", This, pFlow);
++
++    if (!pFlow)
++        return E_POINTER;
++
++    /* Render data flows from the adapter into the endpoint, capture data the
++     * other way around. */
++    if (This->flow == eRender)
++        *pFlow = This->adapter ? Out : In;
++    else
++        *pFlow = This->adapter ? In : Out;
++    return S_OK;
+ }
+ 
+ static HRESULT WINAPI Connector_ConnectTo(
+@@ -3993,35 +4075,50 @@
+ }
+ 
+ static HRESULT WINAPI Connector_IsConnected(
+-    IConnector *This,
++    IConnector *iface,
+     BOOL *pbConnected)
+ {
+-    FIXME("(%p) - stub\n", This);
+-    return E_NOTIMPL;
++    IConnectorImpl *This = impl_from_IConnector(iface);
++    TRACE("(%p)->(%p)\n", This, pbConnected);
++
++    if (!pbConnected)
++        return E_POINTER;
++
++    *pbConnected = TRUE;
++    return S_OK;
+ }
+ 
+ static HRESULT WINAPI Connector_GetConnectedTo(
+-    IConnector *This,
++    IConnector *iface,
+     IConnector **ppConTo)
+ {
+-    FIXME("(%p) - stub\n", This);
+-    return E_NOTIMPL;
++    IConnectorImpl *This = impl_from_IConnector(iface);
++    TRACE("(%p)->(%p)\n", This, ppConTo);
++
++    if (!ppConTo)
++        return E_POINTER;
++
++    return Connector_Create(!This->adapter, This->flow, This->endpoint_id, ppConTo);
+ }
+ 
+ static HRESULT WINAPI Connector_GetConnectorIdConnectedTo(
+-    IConnector *This,
++    IConnector *iface,
+     LPWSTR *ppwstrConnectorId)
+ {
+-    FIXME("(%p) - stub\n", This);
+-    return E_NOTIMPL;
++    IConnectorImpl *This = impl_from_IConnector(iface);
++    TRACE("(%p)->(%p)\n", This, ppwstrConnectorId);
++
++    return connector_global_id(!This->adapter, This->endpoint_id, ppwstrConnectorId);
+ }
+ 
+ static HRESULT WINAPI Connector_GetDeviceIdConnectedTo(
+-    IConnector *This,
++    IConnector *iface,
+     LPWSTR *ppwstrDeviceId)
+ {
+-    FIXME("(%p) - stub\n", This);
+-    return E_NOTIMPL;
++    IConnectorImpl *This = impl_from_IConnector(iface);
++    TRACE("(%p)->(%p)\n", This, ppwstrDeviceId);
++
++    return return_string(part_device_id(!This->adapter, This->endpoint_id), ppwstrDeviceId);
+ }
+ 
+ static const IConnectorVtbl Connector_Vtbl =
+@@ -4039,7 +4136,158 @@
+     Connector_GetDeviceIdConnectedTo,
+ };
+ 
+-HRESULT Connector_Create(IConnector **ppv)
++static HRESULT WINAPI Part_QueryInterface(IPart *iface, REFIID riid, void **ppv)
++{
++    IConnectorImpl *This = impl_from_IPart(iface);
++    return IConnector_QueryInterface(&This->IConnector_iface, riid, ppv);
++}
++
++static ULONG WINAPI Part_AddRef(IPart *iface)
++{
++    IConnectorImpl *This = impl_from_IPart(iface);
++    return IConnector_AddRef(&This->IConnector_iface);
++}
++
++static ULONG WINAPI Part_Release(IPart *iface)
++{
++    IConnectorImpl *This = impl_from_IPart(iface);
++    return IConnector_Release(&This->IConnector_iface);
++}
++
++static HRESULT WINAPI Part_GetName(IPart *iface, LPWSTR *ppwstrName)
++{
++    IConnectorImpl *This = impl_from_IPart(iface);
++    TRACE("(%p)->(%p)\n", This, ppwstrName);
++
++    if (!This->adapter)
++        return return_string(L"", ppwstrName);
++    return return_string(This->flow == eRender ? L"Speakers" : L"Microphone", ppwstrName);
++}
++
++static HRESULT WINAPI Part_GetLocalId(IPart *iface, UINT *pnId)
++{
++    IConnectorImpl *This = impl_from_IPart(iface);
++    TRACE("(%p)->(%p)\n", This, pnId);
++
++    if (!pnId)
++        return E_POINTER;
++
++    *pnId = connector_local_id(This->adapter);
++    return S_OK;
++}
++
++static HRESULT WINAPI Part_GetGlobalId(IPart *iface, LPWSTR *ppwstrGlobalId)
++{
++    IConnectorImpl *This = impl_from_IPart(iface);
++    TRACE("(%p)->(%p)\n", This, ppwstrGlobalId);
++
++    return connector_global_id(This->adapter, This->endpoint_id, ppwstrGlobalId);
++}
++
++static HRESULT WINAPI Part_GetPartType(IPart *iface, PartType *pPartType)
++{
++    IConnectorImpl *This = impl_from_IPart(iface);
++    TRACE("(%p)->(%p)\n", This, pPartType);
++
++    if (!pPartType)
++        return E_POINTER;
++
++    *pPartType = Connector;
++    return S_OK;
++}
++
++static HRESULT WINAPI Part_GetSubType(IPart *iface, GUID *pSubType)
++{
++    IConnectorImpl *This = impl_from_IPart(iface);
++    TRACE("(%p)->(%p)\n", This, pSubType);
++
++    if (!pSubType)
++        return E_POINTER;
++
++    *pSubType = This->flow == eRender ? mmdevapi_KSNODETYPE_SPEAKER : mmdevapi_KSNODETYPE_MICROPHONE;
++    return S_OK;
++}
++
++static HRESULT WINAPI Part_GetControlInterfaceCount(IPart *iface, UINT *pCount)
++{
++    IConnectorImpl *This = impl_from_IPart(iface);
++    TRACE("(%p)->(%p)\n", This, pCount);
++
++    if (!pCount)
++        return E_POINTER;
++
++    *pCount = 0;
++    return S_OK;
++}
++
++static HRESULT WINAPI Part_GetControlInterface(IPart *iface, UINT nIndex, IControlInterface **ppInterfaceDesc)
++{
++    FIXME("(%p)->(%u, %p) - stub\n", iface, nIndex, ppInterfaceDesc);
++    return E_INVALIDARG;
++}
++
++static HRESULT WINAPI Part_EnumPartsIncoming(IPart *iface, IPartsList **ppParts)
++{
++    FIXME("(%p)->(%p) - stub\n", iface, ppParts);
++    return E_NOTFOUND;
++}
++
++static HRESULT WINAPI Part_EnumPartsOutgoing(IPart *iface, IPartsList **ppParts)
++{
++    FIXME("(%p)->(%p) - stub\n", iface, ppParts);
++    return E_NOTFOUND;
++}
++
++static HRESULT WINAPI Part_GetTopologyObjects(IPart *iface, IDeviceTopology **ppTopology)
++{
++    IConnectorImpl *This = impl_from_IPart(iface);
++    TRACE("(%p)->(%p)\n", This, ppTopology);
++
++    if (!ppTopology)
++        return E_POINTER;
++
++    return Topology_Create(This->adapter, This->flow, This->endpoint_id, ppTopology);
++}
++
++static HRESULT WINAPI Part_Activate(IPart *iface, DWORD dwClsContext, REFIID refiid, void **ppvObject)
++{
++    FIXME("(%p)->(%lx, %s, %p) - stub\n", iface, dwClsContext, debugstr_guid(refiid), ppvObject);
++    return E_NOINTERFACE;
++}
++
++static HRESULT WINAPI Part_RegisterControlChangeCallback(IPart *iface, REFGUID riid, IControlChangeNotify *pNotify)
++{
++    FIXME("(%p)->(%s, %p) - stub\n", iface, debugstr_guid(riid), pNotify);
++    return S_OK;
++}
++
++static HRESULT WINAPI Part_UnregisterControlChangeCallback(IPart *iface, IControlChangeNotify *pNotify)
++{
++    FIXME("(%p)->(%p) - stub\n", iface, pNotify);
++    return S_OK;
++}
++
++static const IPartVtbl Part_Vtbl =
++{
++    Part_QueryInterface,
++    Part_AddRef,
++    Part_Release,
++    Part_GetName,
++    Part_GetLocalId,
++    Part_GetGlobalId,
++    Part_GetPartType,
++    Part_GetSubType,
++    Part_GetControlInterfaceCount,
++    Part_GetControlInterface,
++    Part_EnumPartsIncoming,
++    Part_EnumPartsOutgoing,
++    Part_GetTopologyObjects,
++    Part_Activate,
++    Part_RegisterControlChangeCallback,
++    Part_UnregisterControlChangeCallback,
++};
++
++static HRESULT Connector_Create(BOOL adapter, EDataFlow flow, const WCHAR *endpoint_id, IConnector **ppv)
+ {
+     IConnectorImpl *This;
+ 
+@@ -4048,7 +4296,15 @@
+         return E_OUTOFMEMORY;
+ 
+     This->IConnector_iface.lpVtbl = &Connector_Vtbl;
++    This->IPart_iface.lpVtbl = &Part_Vtbl;
+     This->ref = 1;
++    This->adapter = adapter;
++    This->flow = flow;
++    if (!(This->endpoint_id = wcsdup(endpoint_id)))
++    {
++        HeapFree(GetProcessHeap(), 0, This);
++        return E_OUTOFMEMORY;
++    }
+ 
+     *ppv = &This->IConnector_iface;
+ 
+@@ -4091,15 +4347,19 @@
+     TRACE("(%p) new ref %lu\n", This, ref);
+ 
+     if (!ref)
++    {
++        free(This->endpoint_id);
+         HeapFree(GetProcessHeap(), 0, This);
++    }
+ 
+     return ref;
+ }
+ 
+-static HRESULT WINAPI DT_GetConnectorCount(IDeviceTopology *This,
++static HRESULT WINAPI DT_GetConnectorCount(IDeviceTopology *iface,
+                                            UINT *pCount)
+ {
+-    FIXME("(%p)->(%p) - partial stub\n", This, pCount);
++    IDeviceTopologyImpl *This = impl_from_IDeviceTopology(iface);
++    TRACE("(%p)->(%p)\n", This, pCount);
+ 
+     if (!pCount)
+         return E_POINTER;
+@@ -4108,25 +4368,35 @@
+     return S_OK;
+ }
+ 
+-static HRESULT WINAPI DT_GetConnector(IDeviceTopology *This,
++static HRESULT WINAPI DT_GetConnector(IDeviceTopology *iface,
+                                       UINT nIndex,
+                                       IConnector **ppConnector)
+ {
+-    FIXME("(%p)->(%u, %p) - partial stub\n", This, nIndex, ppConnector);
++    IDeviceTopologyImpl *This = impl_from_IDeviceTopology(iface);
++    TRACE("(%p)->(%u, %p)\n", This, nIndex, ppConnector);
++
++    if (!ppConnector)
++        return E_POINTER;
+ 
+     if (nIndex == 0)
+     {
+-        return Connector_Create(ppConnector);
++        return Connector_Create(This->adapter, This->flow, This->endpoint_id, ppConnector);
+     }
+ 
+     return E_INVALIDARG;
+ }
+ 
+-static HRESULT WINAPI DT_GetSubunitCount(IDeviceTopology *This,
++static HRESULT WINAPI DT_GetSubunitCount(IDeviceTopology *iface,
+                                          UINT *pCount)
+ {
+-    FIXME("(%p)->(%p) - stub\n", This, pCount);
+-    return E_NOTIMPL;
++    IDeviceTopologyImpl *This = impl_from_IDeviceTopology(iface);
++    TRACE("(%p)->(%p)\n", This, pCount);
++
++    if (!pCount)
++        return E_POINTER;
++
++    *pCount = 0;
++    return S_OK;
+ }
+ 
+ static HRESULT WINAPI DT_GetSubunit(IDeviceTopology *This,
+@@ -4134,22 +4404,39 @@
+                                     ISubUnit **ppConnector)
+ {
+     FIXME("(%p)->(%u, %p) - stub\n", This, nIndex, ppConnector);
+-    return E_NOTIMPL;
++    return E_INVALIDARG;
+ }
+ 
+-static HRESULT WINAPI DT_GetPartById(IDeviceTopology *This,
++static HRESULT WINAPI DT_GetPartById(IDeviceTopology *iface,
+                                      UINT nId,
+                                      IPart **ppPart)
+ {
+-    FIXME("(%p)->(%u, %p) - stub\n", This, nId, ppPart);
+-    return E_NOTIMPL;
++    IDeviceTopologyImpl *This = impl_from_IDeviceTopology(iface);
++    IConnector *connector;
++    HRESULT hr;
++
++    TRACE("(%p)->(%u, %p)\n", This, nId, ppPart);
++
++    if (!ppPart)
++        return E_POINTER;
++
++    if (nId != connector_local_id(This->adapter))
++        return E_NOTFOUND;
++
++    if (FAILED(hr = Connector_Create(This->adapter, This->flow, This->endpoint_id, &connector)))
++        return hr;
++    hr = IConnector_QueryInterface(connector, &IID_IPart, (void **)ppPart);
++    IConnector_Release(connector);
++    return hr;
+ }
+ 
+-static HRESULT WINAPI DT_GetDeviceId(IDeviceTopology *This,
++static HRESULT WINAPI DT_GetDeviceId(IDeviceTopology *iface,
+                                      LPWSTR *ppwstrDeviceId)
+ {
+-    FIXME("(%p)->(%p) - stub\n", This, ppwstrDeviceId);
+-    return E_NOTIMPL;
++    IDeviceTopologyImpl *This = impl_from_IDeviceTopology(iface);
++    TRACE("(%p)->(%p)\n", This, ppwstrDeviceId);
++
++    return return_string(part_device_id(This->adapter, This->endpoint_id), ppwstrDeviceId);
+ }
+ 
+ static HRESULT WINAPI DT_GetSignalPath(IDeviceTopology *This,
+@@ -4177,7 +4464,7 @@
+     DT_GetSignalPath,
+ };
+ 
+-static HRESULT DeviceTopology_Create(IMMDevice *device, IDeviceTopology **ppv)
++static HRESULT Topology_Create(BOOL adapter, EDataFlow flow, const WCHAR *endpoint_id, IDeviceTopology **ppv)
+ {
+     IDeviceTopologyImpl *This;
+ 
+@@ -4187,8 +4474,28 @@
+ 
+     This->IDeviceTopology_iface.lpVtbl = &DeviceTopology_Vtbl;
+     This->ref = 1;
++    This->adapter = adapter;
++    This->flow = flow;
++    if (!(This->endpoint_id = wcsdup(endpoint_id)))
++    {
++        HeapFree(GetProcessHeap(), 0, This);
++        return E_OUTOFMEMORY;
++    }
+ 
+     *ppv = &This->IDeviceTopology_iface;
+ 
+     return S_OK;
+ }
++
++static HRESULT DeviceTopology_Create(IMMDevice *device, IDeviceTopology **ppv)
++{
++    MMDevice *This = impl_from_IMMDevice(device);
++    WCHAR *endpoint_id;
++    HRESULT hr;
++
++    if (FAILED(hr = IMMDevice_GetId(device, &endpoint_id)))
++        return hr;
++    hr = Topology_Create(FALSE, This->flow, endpoint_id, ppv);
++    CoTaskMemFree(endpoint_id);
++    return hr;
++}

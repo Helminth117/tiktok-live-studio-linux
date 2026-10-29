@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# Lanzador de TikTok LIVE Studio (Windows) en Linux mediante umu-launcher/Proton.
+#
+# Uso:
+#   tiktok-live-studio                 abre la app (la instala si hace falta)
+#   tiktok-live-studio install [EXE]   ejecuta el instalador oficial en el prefijo
+#   tiktok-live-studio winecfg         abre winecfg del prefijo
+#   tiktok-live-studio winetricks ...  ejecuta winetricks en el prefijo
+#   tiktok-live-studio reset           borra el prefijo (se pierde la sesión)
+#
+# Variables: TTLS_PREFIX (ruta del prefijo), PROTONPATH (por defecto GE-Proton11-11),
+#            TTLS_MMDEVAPI (mmdevapi.dll parcheada).
+set -euo pipefail
+
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/tiktok-live-studio"
+export WINEPREFIX="${TTLS_PREFIX:-$DATA_DIR/prefix}"
+export GAMEID="${GAMEID:-umu-default}"
+# sscronet.dll importa SetPerTcp6ConnectionEStats, que Wine añadió en 10.15;
+# UMU-Proton 10.0 no la tiene y la app aborta al iniciar. La versión queda fija
+# porque mmdevapi.dll está compilada contra el Wine de esta release.
+export PROTONPATH="${PROTONPATH:-GE-Proton11-11}"
+# mmdevapi de GE-Proton11-11 con IDeviceTopology/IConnector/IPart implementados:
+# sin ellos MediaSDK descarta todos los dispositivos de audio ("No audio found").
+MMDEVAPI_DLL="${TTLS_MMDEVAPI:-/usr/share/tiktok-live-studio/mmdevapi.dll}"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/tiktok-live-studio"
+DOWNLOAD_URL="https://www.tiktok.com/studio/download"
+SETTINGS_URL="https://webcast.tiktokv.com/service/settings/v3/?app=1&aid=8311&device_platform=win&from_aid=8311&version_code=0.0.0"
+
+die() {
+    if [[ -t 2 ]] || ! command -v zenity >/dev/null; then
+        printf 'error: %s\n' "$*" >&2
+    else
+        zenity --error --title="TikTok LIVE Studio" --text="$*" 2>/dev/null || true
+    fi
+    exit 1
+}
+
+find_app() {
+    [[ -d "$WINEPREFIX/drive_c" ]] || return 1
+    local exe
+    for name in "TikTok LIVE Studio Launcher.exe" "TikTok LIVE Studio.exe"; do
+        exe=$(find "$WINEPREFIX/drive_c" -iname "$name" -print -quit 2>/dev/null)
+        [[ -n "$exe" ]] && { printf '%s\n' "$exe"; return 0; }
+    done
+    return 1
+}
+
+find_installer() {
+    local dl
+    dl=$(xdg-user-dir DOWNLOAD 2>/dev/null || echo "$HOME/Downloads")
+    # El más reciente de los instaladores oficiales descargados.
+    ls -t "$dl"/tiktok_live_studio*.exe "$HOME"/Downloads/tiktok_live_studio*.exe \
+        2>/dev/null | head -n1 || true
+}
+
+# curl con reanudación: el CDN de TikTok corta las descargas largas.
+download() {
+    local url=$1 dest=$2 try
+    shift 2
+    for try in {1..20}; do
+        curl -fL -C - --connect-timeout 20 "$@" -o "$dest" "$url" && return 0
+        echo "Conexión interrumpida; reanudando ($try/20) ..." >&2
+        sleep 3
+    done
+    return 1
+}
+
+# Descarga el instalador completo más reciente desde el servidor de
+# actualizaciones de TikTok y verifica su MD5. Imprime la ruta del .exe.
+fetch_installer() {
+    local info url md5 version dest
+    info=$(curl -fsS "$SETTINGS_URL" | jq -r '.data.settings.live_studio_downloader_windows | "\(.url) \(.md5) \(.version)"') || return 1
+    read -r url md5 version <<<"$info"
+    [[ "$url" == https://* ]] || return 1
+
+    mkdir -p "$CACHE_DIR"
+    dest="$CACHE_DIR/tiktok_live_studio-$version-x64.exe"
+    if [[ -f "$dest" ]] && [[ "$(md5sum "$dest" | cut -d' ' -f1)" == "$md5" ]]; then
+        printf '%s\n' "$dest"; return 0
+    fi
+
+    echo "Descargando TikTok LIVE Studio $version ..." >&2
+    if [[ -t 2 ]] || ! command -v zenity >/dev/null; then
+        download "$url" "$dest.part" >&2 || return 1
+    else
+        download "$url" "$dest.part" -sS | zenity --progress --pulsate --auto-close --no-cancel \
+            --title="TikTok LIVE Studio" --text="Descargando TikTok LIVE Studio $version ..." 2>/dev/null
+        [[ ${PIPESTATUS[0]} -eq 0 ]] || return 1
+    fi
+    [[ "$(md5sum "$dest.part" | cut -d' ' -f1)" == "$md5" ]] || { rm -f "$dest.part"; die "El MD5 del instalador descargado no coincide."; }
+    mv "$dest.part" "$dest"
+    printf '%s\n' "$dest"
+}
+
+install_app() {
+    local installer="${1:-}"
+    [[ -z "$installer" ]] && installer=$(fetch_installer || true)
+    [[ -z "$installer" ]] && installer=$(find_installer)
+    if [[ -z "$installer" ]] && command -v zenity >/dev/null && [[ ! -t 2 ]]; then
+        zenity --question --title="TikTok LIVE Studio" \
+            --text="No se encontró el instalador.\n\nDescárgalo desde $DOWNLOAD_URL y luego selecciónalo." \
+            --ok-label="Abrir página" --cancel-label="Ya lo tengo" 2>/dev/null \
+            && { xdg-open "$DOWNLOAD_URL" >/dev/null 2>&1 & }
+        installer=$(zenity --file-selection --title="Selecciona el instalador de TikTok LIVE Studio" \
+            --file-filter="Instalador (*.exe) | *.exe" 2>/dev/null) || exit 1
+    fi
+    [[ -n "$installer" ]] || die "No se encontró el instalador. Descárgalo desde $DOWNLOAD_URL y ejecuta: tiktok-live-studio install RUTA.exe"
+    [[ -f "$installer" ]] || die "No existe: $installer"
+
+    mkdir -p "$WINEPREFIX"
+    echo "Instalando con $installer en $WINEPREFIX ..." >&2
+    # La interfaz del instalador completo se dibuja en negro con Proton;
+    # en modo silencioso (/S de NSIS) instala sin ella.
+    case "$(basename "$installer")" in
+        tiktok_live_studio_downloader*) umu-run "$installer" ;;
+        *) umu-run "$installer" /S ;;
+    esac
+    find_app >/dev/null || die "El instalador terminó pero no se encontró TikTok LIVE Studio en el prefijo."
+}
+
+install_mmdevapi() {
+    local dst="$WINEPREFIX/drive_c/windows/system32/mmdevapi.dll"
+
+    [[ -f "$MMDEVAPI_DLL" ]] || { echo "aviso: no existe $MMDEVAPI_DLL; el audio no funcionará" >&2; return 0; }
+    cmp -s "$MMDEVAPI_DLL" "$dst" && return 0
+    # Proton deja ahí un enlace a su DLL; se reemplaza el enlace, no su destino.
+    rm -f "$dst"
+    cp "$MMDEVAPI_DLL" "$dst"
+}
+
+run_app() {
+    local exe
+    exe=$(find_app) || { install_app "${1:-}"; exe=$(find_app); }
+    install_mmdevapi
+    export WINEDLLOVERRIDES="mmdevapi=n,b${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
+    cd "$(dirname "$exe")"
+    exec umu-run "$exe"
+}
+
+case "${1:-}" in
+    install) shift; install_app "${1:-}" ;;
+    winecfg) exec umu-run winecfg ;;
+    winetricks) shift; exec umu-run winetricks "$@" ;;
+    reset)
+        read -rp "¿Borrar $WINEPREFIX? [s/N] " ans
+        if [[ "$ans" == [sS] ]]; then rm -rf -- "$WINEPREFIX"; echo "Prefijo borrado."; fi ;;
+    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) run_app "${1:-}" ;;
+esac
