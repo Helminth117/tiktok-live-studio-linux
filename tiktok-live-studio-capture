@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+"""Ayudante de captura de pantalla para TikTok LIVE Studio bajo Wine.
+
+Wine no puede ver la pantalla en Wayland, así que este proceso pide la
+captura al portal del escritorio (org.freedesktop.portal.ScreenCast), recibe
+los fotogramas por PipeWire y los deja en memoria compartida. El winex11.so
+parcheado los copia cuando una app lee la imagen del escritorio (BitBlt).
+
+La captura empieza cuando Wine crea <shm>.request (la primera vez que una app
+lee el escritorio) y se detiene si nadie lee durante IDLE_TIMEOUT segundos.
+
+Formato de <shm> (little endian):
+  0  u32 magic 'TLSC'      4  u32 versión (1)
+  8  u32 seq: impar mientras se escribe un fotograma
+  12 u32 ancho   16 u32 alto   20 u32 stride (bytes)   24 u32 formato (0 = BGRx)
+  28 u32 reservado
+  32 u64 última lectura de Wine (CLOCK_MONOTONIC, ms)
+  64 píxeles
+"""
+
+import mmap
+import os
+import random
+import struct
+import sys
+import time
+
+import gi
+
+gi.require_version("Gst", "1.0")
+from gi.repository import Gio, GLib, Gst  # noqa: E402
+
+MAGIC = 0x43534C54
+HEADER = 64
+MAX_W, MAX_H = 3840, 2160
+IDLE_TIMEOUT = 15
+
+SHM = os.environ.get("TTLS_CAPTURE_SHM", f"/dev/shm/tiktok-live-studio-capture-{os.getuid()}")
+TOKEN = os.path.join(
+    os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
+    "tiktok-live-studio", "capture.token")
+
+PORTAL = "org.freedesktop.portal.Desktop"
+PORTAL_PATH = "/org/freedesktop/portal/desktop"
+SCREENCAST = "org.freedesktop.portal.ScreenCast"
+
+
+def log(*args):
+    print("tiktok-live-studio-capture:", *args, file=sys.stderr, flush=True)
+
+
+class Shm:
+    def __init__(self, path):
+        size = HEADER + MAX_W * MAX_H * 4
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        os.ftruncate(fd, size)
+        self.map = mmap.mmap(fd, size)
+        os.close(fd)
+        self.seq = 0
+        struct.pack_into("<IIIIIIII", self.map, 0, MAGIC, 1, 0, 0, 0, 0, 0, 0)
+
+    def write(self, width, height, stride, data):
+        self.seq += 1
+        struct.pack_into("<I", self.map, 8, self.seq)          # impar: escribiendo
+        self.map[HEADER:HEADER + len(data)] = data
+        struct.pack_into("<IIII", self.map, 12, width, height, stride, 0)
+        self.seq += 1
+        struct.pack_into("<I", self.map, 8, self.seq)
+
+    def last_read(self):
+        return struct.unpack_from("<Q", self.map, 32)[0]
+
+    def clear(self):
+        struct.pack_into("<IIII", self.map, 12, 0, 0, 0, 0)
+
+
+class Capture:
+    def __init__(self, shm, loop):
+        self.shm = shm
+        self.loop = loop
+        self.bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+        self.sender = self.bus.get_unique_name()[1:].replace(".", "_")
+        self.session = None
+        self.pipeline = None
+        self.active = False
+
+    # -- portal ----------------------------------------------------------
+    def _request(self, method, args, callback):
+        token = f"ttls{random.randrange(1 << 30)}"
+        path = f"/org/freedesktop/portal/desktop/request/{self.sender}/{token}"
+
+        def on_response(_conn, _sender, _path, _iface, _signal, params):
+            self.bus.signal_unsubscribe(sub)
+            code, results = params.unpack()
+            callback(code, results)
+
+        sub = self.bus.signal_subscribe(PORTAL, "org.freedesktop.portal.Request", "Response",
+                                        path, None, Gio.DBusSignalFlags.NO_MATCH_RULE, on_response)
+        args[-1]["handle_token"] = GLib.Variant("s", token)
+        self.bus.call_sync(PORTAL, PORTAL_PATH, SCREENCAST, method,
+                           GLib.Variant(self._signature(method), tuple(args)),
+                           None, Gio.DBusCallFlags.NONE, -1, None)
+
+    @staticmethod
+    def _signature(method):
+        return {"CreateSession": "(a{sv})", "SelectSources": "(oa{sv})",
+                "Start": "(osa{sv})"}[method]
+
+    def start(self):
+        if self.active:
+            return
+        self.active = True
+        log("pidiendo captura al portal")
+        self._request("CreateSession", [{
+            "session_handle_token": GLib.Variant("s", f"ttls{random.randrange(1 << 30)}")}],
+            self._on_session)
+
+    def _on_session(self, code, results):
+        if code != 0:
+            return self._fail("CreateSession", code)
+        self.session = results["session_handle"]
+        opts = {"types": GLib.Variant("u", 1 | 2),       # monitor | ventana
+                "multiple": GLib.Variant("b", False),
+                "cursor_mode": GLib.Variant("u", 2),     # cursor dentro de la imagen
+                "persist_mode": GLib.Variant("u", 2)}
+        try:
+            with open(TOKEN) as f:
+                opts["restore_token"] = GLib.Variant("s", f.read().strip())
+        except OSError:
+            pass
+        self._request("SelectSources", [self.session, opts], self._on_sources)
+
+    def _on_sources(self, code, _results):
+        if code != 0:
+            return self._fail("SelectSources", code)
+        self._request("Start", [self.session, "", {}], self._on_start)
+
+    def _on_start(self, code, results):
+        if code != 0:
+            return self._fail("Start", code)
+        if "restore_token" in results:
+            os.makedirs(os.path.dirname(TOKEN), exist_ok=True)
+            with open(TOKEN, "w") as f:
+                f.write(results["restore_token"])
+        node = results["streams"][0][0]
+        msg = Gio.DBusMessage.new_method_call(PORTAL, PORTAL_PATH, SCREENCAST, "OpenPipeWireRemote")
+        msg.set_body(GLib.Variant("(oa{sv})", (self.session, {})))
+        reply = self.bus.send_message_with_reply_sync(msg, Gio.DBusSendMessageFlags.NONE, -1, None)[0]
+        fd = reply.get_unix_fd_list().get(reply.get_body().unpack()[0])
+        self._start_pipeline(fd, node)
+
+    def _fail(self, step, code):
+        log(f"{step}: el portal respondió {code} (cancelado o denegado)")
+        if code == 2 and os.path.exists(TOKEN):
+            os.remove(TOKEN)        # un permiso guardado que ya no vale
+        self.stop()
+
+    # -- PipeWire -> memoria compartida ------------------------------------
+    def _start_pipeline(self, fd, node):
+        # PipeWire entrega los monitores girados sin girar, con la rotación como
+        # metadato; videoflip method=automatic la aplica.
+        self.pipeline = Gst.parse_launch(
+            f"pipewiresrc fd={fd} path={node} always-copy=true do-timestamp=true ! "
+            "videoconvert ! videoflip method=automatic ! video/x-raw,format=BGRx ! "
+            "appsink name=sink emit-signals=true max-buffers=1 drop=true sync=false")
+        self.pipeline.get_by_name("sink").connect("new-sample", self._on_sample)
+        self.pipeline.get_bus().add_signal_watch()
+        self.pipeline.get_bus().connect("message::error", self._on_error)
+        self.pipeline.set_state(Gst.State.PLAYING)
+        log(f"capturando el nodo {node} de PipeWire")
+
+    def _on_sample(self, sink):
+        sample = sink.emit("pull-sample")
+        caps = sample.get_caps().get_structure(0)
+        width, height = caps.get_value("width"), caps.get_value("height")
+        if width > MAX_W or height > MAX_H:
+            return Gst.FlowReturn.OK
+        buf = sample.get_buffer()
+        ok, info = buf.map(Gst.MapFlags.READ)
+        if ok:
+            stride = info.size // height
+            self.shm.write(width, height, stride, info.data)
+            buf.unmap(info)
+        return Gst.FlowReturn.OK
+
+    def _on_error(self, _bus, msg):
+        log("error de GStreamer:", msg.parse_error()[0].message)
+        self.stop()
+
+    def stop(self):
+        if self.pipeline:
+            self.pipeline.set_state(Gst.State.NULL)
+            self.pipeline = None
+        if self.session:
+            try:
+                self.bus.call_sync(PORTAL, self.session, "org.freedesktop.portal.Session", "Close",
+                                   None, None, Gio.DBusCallFlags.NONE, -1, None)
+            except GLib.Error:
+                pass
+            self.session = None
+        self.shm.clear()
+        try:
+            os.remove(SHM + ".request")
+        except OSError:
+            pass
+        self.active = False
+
+
+def main():
+    Gst.init(None)
+    loop = GLib.MainLoop()
+    shm = Shm(SHM)
+    capture = Capture(shm, loop)
+    started = 0.0
+
+    def tick():
+        nonlocal started
+        if not capture.active and os.path.exists(SHM + ".request"):
+            started = time.monotonic()
+            capture.start()
+        elif capture.active and time.monotonic() - started > IDLE_TIMEOUT:
+            idle = time.clock_gettime(time.CLOCK_MONOTONIC) * 1000 - shm.last_read()
+            if idle > IDLE_TIMEOUT * 1000:
+                log("nadie lee la captura; se detiene")
+                capture.stop()
+        return True
+
+    if "--now" in sys.argv:
+        open(SHM + ".request", "a").close()
+    GLib.timeout_add(500, tick)
+    try:
+        loop.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        capture.stop()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,158 @@
+--- a/dlls/winex11.drv/bitblt.c
++++ b/dlls/winex11.drv/bitblt.c
+@@ -29,6 +29,11 @@
+ #include <stdarg.h>
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <time.h>
++#include <unistd.h>
+ 
+ #include <X11/Xlib.h>
+ #include <X11/Xresource.h>
+@@ -1309,6 +1314,122 @@
+     return ERROR_BAD_FORMAT;
+ }
+ 
++/* Under Wayland the X root window holds none of the native windows, so a
++ * capture of the desktop is black. When WINE_SCREEN_CAPTURE_SHM is set, reads
++ * of the root window come instead from frames that a helper process gets
++ * through the screencast portal and writes to that shared memory file. */
++struct capture_header
++{
++    UINT magic;
++    UINT version;
++    UINT seq;       /* odd while the helper writes a frame */
++    UINT width;
++    UINT height;
++    UINT stride;
++    UINT format;    /* 0: BGRx */
++    UINT reserved;
++    UINT64 last_read;
++};
++
++#define CAPTURE_MAGIC  0x43534c54
++#define CAPTURE_HEADER 64
++
++static struct capture_header *capture_map( size_t *size )
++{
++    static struct capture_header *header;
++    static size_t header_size;
++    static time_t last_try;
++    const char *path = getenv( "WINE_SCREEN_CAPTURE_SHM" );
++    struct stat st;
++    void *ptr;
++    int fd;
++
++    if (header || !path) goto done;
++    if (time( NULL ) == last_try) return NULL;
++    last_try = time( NULL );
++
++    if ((fd = open( path, O_RDWR )) == -1) return NULL;
++    if (!fstat( fd, &st ) && st.st_size > CAPTURE_HEADER &&
++        (ptr = mmap( NULL, st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 )) != MAP_FAILED)
++    {
++        if (((struct capture_header *)ptr)->magic == CAPTURE_MAGIC)
++        {
++            header = ptr;
++            header_size = st.st_size;
++        }
++        else munmap( ptr, st.st_size );
++    }
++    close( fd );
++done:
++    *size = header_size;
++    return header;
++}
++
++static void capture_request(void)
++{
++    const char *path = getenv( "WINE_SCREEN_CAPTURE_SHM" );
++    char request[1024];
++    int fd;
++
++    if (snprintf( request, sizeof(request), "%s.request", path ) >= sizeof(request)) return;
++    if ((fd = open( request, O_WRONLY | O_CREAT, 0600 )) != -1) close( fd );
++}
++
++/* returns the last captured frame scaled to width x height, or NULL */
++static XImage *get_captured_screen( UINT width, UINT height )
++{
++    struct capture_header *header;
++    struct timespec now;
++    UINT seq, src_w, src_h, stride, x, y, tries;
++    const BYTE *frame;
++    XImage *image;
++    size_t size;
++    UINT *dst;
++
++    if (!(header = capture_map( &size )))
++    {
++        if (getenv( "WINE_SCREEN_CAPTURE_SHM" )) capture_request();
++        return NULL;
++    }
++    clock_gettime( CLOCK_MONOTONIC, &now );
++    header->last_read = (UINT64)now.tv_sec * 1000 + now.tv_nsec / 1000000;
++
++    if (!(dst = malloc( (size_t)width * height * 4 ))) return NULL;
++    frame = (const BYTE *)header + CAPTURE_HEADER;
++
++    for (tries = 0; tries < 3; tries++)
++    {
++        seq = __atomic_load_n( &header->seq, __ATOMIC_ACQUIRE );
++        if (seq & 1) continue;
++        src_w = header->width;
++        src_h = header->height;
++        stride = header->stride;
++        if (!src_w || !src_h || header->format ||
++            CAPTURE_HEADER + (size_t)stride * src_h > size || stride < src_w * 4)
++        {
++            capture_request();
++            free( dst );
++            return NULL;
++        }
++        for (y = 0; y < height; y++)
++        {
++            const UINT *row = (const UINT *)(frame + (size_t)(y * src_h / height) * stride);
++            for (x = 0; x < width; x++) dst[(size_t)y * width + x] = row[x * src_w / width];
++        }
++        if (__atomic_load_n( &header->seq, __ATOMIC_ACQUIRE ) == seq) break;
++    }
++    if (tries == 3)
++    {
++        free( dst );
++        return NULL;
++    }
++
++    if (!(image = XCreateImage( gdi_display, default_visual.visual, default_visual.depth, ZPixmap, 0,
++                                (char *)dst, width, height, 32, width * 4 )))
++        free( dst );
++    return image;
++}
++
+ /***********************************************************************
+  *           X11DRV_GetImage
+  */
+@@ -1367,6 +1488,12 @@
+     src->y -= y;
+     OffsetRect( &src->visrect, -x, -y );
+ 
++    image = NULL;
++    if (physdev->drawable == root_window && format->bits_per_pixel == 32)
++        image = get_captured_screen( width, height );
++
++    if (!image)
++    {
+     X11DRV_expect_error( gdi_display, XGetImage_handler, NULL );
+     image = XGetImage( gdi_display, physdev->drawable,
+                        physdev->dc_rect.left + x, physdev->dc_rect.top + y,
+@@ -1384,6 +1511,7 @@
+         XFreePixmap( gdi_display, pixmap );
+         XFreeGC( gdi_display, gc );
+     }
++    }
+ 
+     if (!image) return ERROR_OUTOFMEMORY;
+ 

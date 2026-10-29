@@ -25,9 +25,10 @@ Wine fix that makes **microphones and speakers work** inside the app.
 | Install / auto-update | Works (installer runs silently; its GUI renders black under Proton) |
 | Login, studio UI | Works |
 | Microphone / speakers | Works with the patched `mmdevapi.dll` from this repo |
-| Camera | Detected (DirectShow); not verified on a stream |
+| Camera (webcam) | Works |
+| Display capture (screen or a window) | Works with the patched `winex11.so` and the capture helper |
+| TikTok's own *Window capture* / *Game capture* | Do not work (they only see Windows apps); use *Display capture* and pick the window |
 | Going LIVE | Not verified yet |
-| Game / window capture | Not tested |
 
 Tested on Arch Linux (Omarchy, Hyprland/Wayland, PipeWire, AMD Radeon Vega),
 TikTok LIVE Studio 1.39.0, GE-Proton11-11.
@@ -78,14 +79,36 @@ pins `PROTONPATH=GE-Proton11-11`.
 Also needed: Wine ≥ 10.15. TikTok's network library imports
 `IPHLPAPI.SetPerTcp6ConnectionEStats`, so UMU-Proton 10.0 aborts at start.
 
-### Rebuilding the DLL
+## Screen and window capture
+
+Wine has neither Windows Graphics Capture nor DXGI Desktop Duplication, so
+TikTok falls back to GDI: it reads the desktop with `BitBlt`. Under Wayland the
+X root window contains none of your native windows, so that read is black.
+
+[`winex11-screen-capture.patch`](winex11-screen-capture.patch) makes
+`X11DRV_GetImage` read the desktop from shared memory instead, when
+`WINE_SCREEN_CAPTURE_SHM` is set. [`tiktok-live-studio-capture`](tiktok-live-studio-capture)
+fills it: the first time TikTok reads the desktop it asks the
+`org.freedesktop.portal.ScreenCast` portal, so your desktop shows its usual
+**share dialog where you pick a screen or a window**, and it receives the frames
+over PipeWire (rotated monitors are straightened). It stops when nothing reads
+for 15 s.
+
+In TikTok: *Add source → Display capture*. The choice is remembered; run
+`tiktok-live-studio cambiar-captura` to be asked again.
+
+The launcher runs the app with a copy of GE-Proton11-11 made of hard links
+(`~/.local/share/tiktok-live-studio/proton`, almost no extra disk) where only
+`winex11.so` differs; GE-Proton itself is not modified.
+
+### Rebuilding the Wine modules
 
 ```sh
-tools/prepare-wine.sh    # GE-Proton11-11 Wine tree in ~/Projects/wine-ge (~300 MB)
-tools/build-mmdevapi.sh  # applies the patch, builds with clang, copies mmdevapi.dll here
+tools/prepare-wine.sh        # GE-Proton11-11 Wine tree in ~/Projects/wine-ge (~300 MB)
+tools/build-wine-modules.sh  # applies both patches, builds mmdevapi.dll and winex11.so here
 ```
 
-Needs `clang`, `lld`, `bison`, `flex` and `autoconf`.
+Needs `clang`, `lld`, `bison`, `flex`, `autoconf` and the X11 headers.
 
 ## Troubleshooting
 
@@ -133,6 +156,20 @@ found)». El motor de medios de TikTok recorre la topología de cada dispositivo
 descartaba todos los dispositivos. El parche la implementa; el lanzador copia la
 DLL al prefijo y la carga solo para esta app, sin modificar GE-Proton.
 
+### Captura de pantalla y ventanas
+
+En TikTok usa *Add source → Display capture*. La primera vez aparece el diálogo
+de tu escritorio para compartir pantalla: elige **una pantalla o una ventana**.
+La elección se recuerda; `tiktok-live-studio cambiar-captura` hace que vuelva a
+preguntar. Las fuentes *Window capture* y *Game capture* propias de TikTok no
+funcionan (solo ven apps de Windows).
+
+Funciona así: Wine no tiene las APIs de captura de Windows y TikTok termina
+leyendo el escritorio con GDI, que en Wayland sale negro. El `winex11.so`
+parcheado toma esa imagen de memoria compartida, donde
+`tiktok-live-studio-capture` deja lo que recibe del portal de captura por
+PipeWire.
+
 ### Problemas comunes
 
 - **Micrófono demasiado sensible**: si en `pactl list sources` el *Base Volume*
@@ -140,4 +177,7 @@ DLL al prefijo y la carga solo para esta app, sin modificar GE-Proton.
   hardware. Bájalo: `pactl set-source-volume @DEFAULT_SOURCE@ 30%`.
 - **Icono genérico en el menú (Omarchy)**: la shell indexa los iconos al
   arrancar; ejecuta `omarchy-restart-shell` después de instalar.
-- **Captura de juegos y ventanas**: sin probar.
+- **No aparece el diálogo para compartir pantalla**: revisa que tengas un portal
+  (`xdg-desktop-portal-hyprland`, `-gnome`, `-kde` o `-wlr`) y, en Hyprland, que
+  `~/.config/hypr/xdph.conf` no apunte a un `custom_picker_binary` que ya no
+  existe.

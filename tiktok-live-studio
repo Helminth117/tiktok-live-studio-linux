@@ -7,9 +7,12 @@
 #   tiktok-live-studio winecfg         abre winecfg del prefijo
 #   tiktok-live-studio winetricks ...  ejecuta winetricks en el prefijo
 #   tiktok-live-studio reset           borra el prefijo (se pierde la sesión)
+#   tiktok-live-studio cambiar-captura olvida la pantalla/ventana elegida para
+#                                      "Display capture"; vuelve a preguntar
 #
 # Variables: TTLS_PREFIX (ruta del prefijo), PROTONPATH (por defecto GE-Proton11-11,
-#            que se descarga si falta), TTLS_MMDEVAPI (mmdevapi.dll parcheada).
+#            que se descarga si falta; con otro valor no hay captura de pantalla),
+#            TTLS_MMDEVAPI, TTLS_WINEX11, TTLS_CAPTURE_HELPER (archivos parcheados).
 set -euo pipefail
 
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/tiktok-live-studio"
@@ -25,6 +28,12 @@ PROTON_URL="https://github.com/GloriousEggroll/proton-ge-custom/releases/downloa
 # mmdevapi de GE-Proton11-11 con IDeviceTopology/IConnector/IPart implementados:
 # sin ellos MediaSDK descarta todos los dispositivos de audio ("No audio found").
 MMDEVAPI_DLL="${TTLS_MMDEVAPI:-/usr/share/tiktok-live-studio/mmdevapi.dll}"
+# winex11.so de GE-Proton11-11 que, en Wayland, toma la imagen del escritorio
+# de tiktok-live-studio-capture (portal ScreenCast + PipeWire) en vez de la
+# ventana raíz de X, que sale negra. Va en una copia de GE-Proton con enlaces duros.
+WINEX11_SO="${TTLS_WINEX11:-/usr/share/tiktok-live-studio/winex11.so}"
+CAPTURE_HELPER="${TTLS_CAPTURE_HELPER:-/usr/lib/tiktok-live-studio/tiktok-live-studio-capture}"
+CAPTURE_PROTON_DIR="$DATA_DIR/proton"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/tiktok-live-studio"
 DOWNLOAD_URL="https://www.tiktok.com/studio/download"
 SETTINGS_URL="https://webcast.tiktokv.com/service/settings/v3/?app=1&aid=8311&device_platform=win&from_aid=8311&version_code=0.0.0"
@@ -93,6 +102,31 @@ ensure_proton() {
         [[ -f "$PROTON_DIR/toolmanifest.vdf" ]] || die "$PROTON_RELEASE no quedó en $PROTON_DIR."
     fi
     export PROTONPATH="$PROTON_DIR"
+    ensure_capture_proton
+}
+
+# Copia de GE-Proton en la que solo cambia winex11.so; con enlaces duros casi
+# no ocupa disco y GE-Proton queda intacto.
+ensure_capture_proton() {
+    local so=files/lib/wine/x86_64-unix/winex11.so tmp="$CAPTURE_PROTON_DIR.tmp"
+
+    [[ -f "$WINEX11_SO" ]] || { echo "aviso: no existe $WINEX11_SO; no habrá captura de pantalla" >&2; return 0; }
+    if ! cmp -s "$WINEX11_SO" "$CAPTURE_PROTON_DIR/$so"; then
+        rm -rf -- "${tmp:?}"
+        cp -al "$PROTON_DIR" "$tmp" 2>/dev/null || cp -a --reflink=auto "$PROTON_DIR" "$tmp"
+        rm -f -- "${tmp:?}/$so"
+        cp "$WINEX11_SO" "$tmp/$so"
+        rm -rf -- "${CAPTURE_PROTON_DIR:?}"
+        mv "$tmp" "$CAPTURE_PROTON_DIR"
+    fi
+    export PROTONPATH="$CAPTURE_PROTON_DIR"
+}
+
+start_capture_helper() {
+    [[ -x "$CAPTURE_HELPER" && "$PROTONPATH" == "$CAPTURE_PROTON_DIR" ]] || return 0
+    export WINE_SCREEN_CAPTURE_SHM="/dev/shm/tiktok-live-studio-capture-$(id -u)"
+    "$CAPTURE_HELPER" &
+    CAPTURE_PID=$!
 }
 
 # Descarga el instalador completo más reciente desde el servidor de
@@ -163,8 +197,11 @@ run_app() {
     exe=$(find_app) || { install_app "${1:-}"; exe=$(find_app); }
     install_mmdevapi
     export WINEDLLOVERRIDES="mmdevapi=n,b${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
+    start_capture_helper
     cd "$(dirname "$exe")"
-    exec umu-run "$exe"
+    [[ -n "${CAPTURE_PID:-}" ]] || exec umu-run "$exe"
+    trap 'kill "$CAPTURE_PID" 2>/dev/null' EXIT
+    umu-run "$exe"
 }
 
 case "${1:-}" in
@@ -174,6 +211,9 @@ case "${1:-}" in
     reset)
         read -rp "¿Borrar $WINEPREFIX? [s/N] " ans
         if [[ "$ans" == [sS] ]]; then rm -rf -- "$WINEPREFIX"; echo "Prefijo borrado."; fi ;;
-    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' ;;
+    cambiar-captura)
+        rm -f -- "$CACHE_DIR/capture.token"
+        echo "La próxima Display capture preguntará qué pantalla o ventana compartir." ;;
+    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' ;;
     *) ensure_proton; run_app "${1:-}" ;;
 esac
