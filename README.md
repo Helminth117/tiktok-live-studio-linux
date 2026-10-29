@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/helminth117-logo-dark.svg">
+    <img src="assets/helminth117-logo-light.svg" alt="helminth117" width="420">
+  </picture>
+</p>
+
 # TikTok LIVE Studio on Linux
 
 Unofficial launcher and Arch Linux package that runs the Windows version of
