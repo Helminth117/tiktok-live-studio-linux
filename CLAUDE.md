@@ -14,7 +14,7 @@ Responde siempre en español.
 - **sudo:** no pidas ni guardes contraseñas. El usuario instala paquetes en su terminal.
 - **`activar-deteccion`:** registra un script como picker del portal. La corre el usuario.
 - **Commits y push:** solo si los pide. Si `gh` tiene activa otra cuenta, no la cambies:
-  `git -c credential.helper='!f() { echo username=Helminth117; echo "password=$(gh auth token --user Helminth117)"; }; f' push`
+  `git -c credential.helper= -c credential.helper='!f() { echo username=Helminth117; echo "password=$(gh auth token --user Helminth117)"; }; f' push`
 - **Empaquetado:** al cambiar un archivo fuente, sube `pkgver` y recalcula los `sha256sums`.
 - **Mundos de Minecraft:** no toques los del usuario.
 
@@ -81,9 +81,9 @@ Cambios, de más a menos ahorro esperado:
    opcional: no conviene en juegos.
 5. Revisar si hacen falta `always-copy=true` y `videoconvert`.
 
-Mide cada cambio de punta a punta contra la línea base, con las mismas fuentes. El usuario
-dijo que usa o puede usar efectos de cámara: se vieron errores de los filtros de belleza en
-los registros, y su costo en MediaSDK no se ha medido.
+Mide cada cambio de punta a punta contra la línea base, con las mismas fuentes. Se vieron
+errores de los filtros de belleza en los registros; no se sabe si están activos ni cuánto
+pesan en MediaSDK.
 
 ### 3. Menores
 
