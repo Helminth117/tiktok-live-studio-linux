@@ -27,7 +27,9 @@ Wine fix that makes **microphones and speakers work** inside the app.
 | Microphone / speakers | Works with the patched `mmdevapi.dll` from this repo |
 | Camera (webcam) | Works |
 | Display capture (screen or a window) | Works with the patched `winex11.so` and the capture helper |
-| TikTok's own *Window capture* / *Game capture* | Do not work (they only see Windows apps); use *Display capture* and pick the window |
+| Games (tested: Minecraft Java) | *Display capture* → pick the game's **screen** (game fullscreen) or a **region**: 25–50 fps, as fast as the game draws |
+| TikTok's own *Window capture* / *Game capture* | Do not work: they inject into Windows processes and only see Windows apps |
+| Sharing a single **window** in the portal | Native Wayland windows: not tested. XWayland windows (Minecraft Java, most games): no frames with `xdg-desktop-portal-hyprland` 1.4 |
 | Going LIVE | Not verified yet |
 
 Tested on Arch Linux (Omarchy, Hyprland/Wayland, PipeWire, AMD Radeon Vega),
@@ -95,7 +97,15 @@ over PipeWire (rotated monitors are straightened). It stops when nothing reads
 for 15 s.
 
 In TikTok: *Add source → Display capture*. The choice is remembered; run
-`tiktok-live-studio cambiar-captura` to be asked again.
+`tiktok-live-studio cambiar-captura` to be asked again (it switches right away,
+even while TikTok is open).
+
+For games, put the game in fullscreen and pick its **screen**, or use the
+**Region** tab. Sharing a single window of an XWayland app (Minecraft Java and
+most games) delivers no frames with `xdg-desktop-portal-hyprland` 1.4: with
+shared memory it loops on "Out of buffers", and with DMA-BUF GStreamer's
+`glupload` fails to import the frames. Minecraft also lowers its own frame rate
+when it thinks you are AFK (*Video Settings → Inactivity FPS Limit*).
 
 The launcher runs the app with a copy of GE-Proton11-11 made of hard links
 (`~/.local/share/tiktok-live-studio/proton`, almost no extra disk) where only
@@ -161,7 +171,11 @@ DLL al prefijo y la carga solo para esta app, sin modificar GE-Proton.
 En TikTok usa *Add source → Display capture*. La primera vez aparece el diálogo
 de tu escritorio para compartir pantalla: elige **una pantalla o una ventana**.
 La elección se recuerda; `tiktok-live-studio cambiar-captura` hace que vuelva a
-preguntar. Las fuentes *Window capture* y *Game capture* propias de TikTok no
+preguntar, aunque TikTok esté abierto. Para juegos (probado con Minecraft Java)
+pon el juego en pantalla completa y elige su **pantalla**, o usa la pestaña
+**Region**: llega a 25–50 fps. Compartir una sola **ventana** de XWayland (como
+Minecraft) no envía imagen con `xdg-desktop-portal-hyprland` 1.4. Las fuentes
+*Window capture* y *Game capture* propias de TikTok no
 funcionan (solo ven apps de Windows).
 
 Funciona así: Wine no tiene las APIs de captura de Windows y TikTok termina

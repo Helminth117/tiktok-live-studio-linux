@@ -159,6 +159,9 @@ class Capture:
     def _start_pipeline(self, fd, node):
         # PipeWire entrega los monitores girados sin girar, con la rotación como
         # metadato; videoflip method=automatic la aplica.
+        # Ventanas de XWayland: xdph 1.4 no entrega fotogramas por memoria
+        # compartida, y por DMA-BUF glupload falla ("Failed to upload buffer");
+        # en esos casos sirven Screen (juego a pantalla completa) o Region.
         self.pipeline = Gst.parse_launch(
             f"pipewiresrc fd={fd} path={node} always-copy=true do-timestamp=true ! "
             "videoconvert ! videoflip method=automatic ! video/x-raw,format=BGRx ! "
@@ -215,6 +218,13 @@ def main():
 
     def tick():
         nonlocal started
+        # "tiktok-live-studio cambiar-captura": se suelta la fuente actual y, en
+        # cuanto Wine vuelva a pedir la imagen, el portal pregunta de nuevo.
+        if os.path.exists(SHM + ".reset"):
+            os.remove(SHM + ".reset")
+            if capture.active:
+                log("cambio de fuente pedido")
+                capture.stop()
         if not capture.active and os.path.exists(SHM + ".request"):
             started = time.monotonic()
             capture.start()

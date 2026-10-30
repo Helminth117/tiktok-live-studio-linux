@@ -7,8 +7,8 @@
 #   tiktok-live-studio winecfg         abre winecfg del prefijo
 #   tiktok-live-studio winetricks ...  ejecuta winetricks en el prefijo
 #   tiktok-live-studio reset           borra el prefijo (se pierde la sesión)
-#   tiktok-live-studio cambiar-captura olvida la pantalla/ventana elegida para
-#                                      "Display capture"; vuelve a preguntar
+#   tiktok-live-studio cambiar-captura vuelve a preguntar qué pantalla o ventana
+#                                      compartir en "Display capture"
 #
 # Variables: TTLS_PREFIX (ruta del prefijo), PROTONPATH (por defecto GE-Proton11-11,
 #            que se descarga si falta; con otro valor no hay captura de pantalla),
@@ -213,7 +213,8 @@ case "${1:-}" in
         if [[ "$ans" == [sS] ]]; then rm -rf -- "$WINEPREFIX"; echo "Prefijo borrado."; fi ;;
     cambiar-captura)
         rm -f -- "$CACHE_DIR/capture.token"
-        echo "La próxima Display capture preguntará qué pantalla o ventana compartir." ;;
+        touch "/dev/shm/tiktok-live-studio-capture-$(id -u).reset"
+        echo "Display capture va a preguntar qué pantalla o ventana compartir." ;;
     -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' ;;
     *) ensure_proton; run_app "${1:-}" ;;
 esac
