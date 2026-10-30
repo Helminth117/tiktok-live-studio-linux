@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Selector de xdg-desktop-portal-hyprland (custom_picker_binary) para TikTok LIVE Studio.
+
+El portal no vuelve a encontrar una ventana cuando su app se cierra y se reabre. Si
+tiktok-live-studio-capture está pidiendo una ranura (<shm>.picking) cuya app recuerda,
+esta se elige sola sin mostrar nada. En cualquier otro caso, incluidas las demás apps
+del escritorio, se abre el selector normal de Hyprland, y lo elegido para esa ranura se
+recuerda.
+"""
+
+import os
+import re
+import subprocess
+import sys
+
+SHM = f"/dev/shm/tiktok-live-studio-capture-{os.getuid()}"
+CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "tiktok-live-studio")
+
+
+def read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def windows():
+    # id[HC>]clase[HT>]título[HE>]dirección[HA>]id[HC>]...
+    text = os.environ.get("XDPH_WINDOW_SHARING_LIST", "")
+    return {int(match[1]) & 0xffffffff: match[2]
+            for match in re.finditer(r"(-?\d+)\[HC>\](.*?)\[HT>\]", text, re.S)}
+
+
+def signed(handle):
+    # hyprland-share-picker lo escribe como entero de 32 bits con signo.
+    return handle - (1 << 32) if handle >= 1 << 31 else handle
+
+
+slot = read(SHM + ".picking")
+class_file = os.path.join(CACHE, f"capture.{slot}.class")
+known = windows()
+
+if slot and read(class_file):
+    for handle, window_class in known.items():
+        if window_class == read(class_file):
+            print(f"[SELECTION]r/window:{signed(handle)}")
+            sys.exit(0)
+    # La app recordada está cerrada: el ayudante la espera, no hay nada que preguntar.
+    sys.exit(1)
+
+picker = subprocess.run(["hyprland-share-picker", *sys.argv[1:]], stdout=subprocess.PIPE, text=True)
+sys.stdout.write(picker.stdout)
+chosen = re.search(r"window:(-?\d+)", picker.stdout)
+if slot and chosen and int(chosen[1]) & 0xffffffff in known:
+    os.makedirs(CACHE, exist_ok=True)
+    with open(class_file, "w") as f:
+        f.write(known[int(chosen[1]) & 0xffffffff] + "\n")
+sys.exit(picker.returncode)

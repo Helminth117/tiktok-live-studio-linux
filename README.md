@@ -30,7 +30,7 @@ Wine fix that makes **microphones and speakers work** inside the app.
 | Games (tested: Minecraft Java) | *Display capture* → pick the game's **window** or **screen** (game fullscreen): 25–59 fps, as fast as the game draws. A **region** works too, with black bars if it does not fill the frame |
 | TikTok's own *Window capture* / *Game capture* | Do not work: they inject into Windows processes and only see Windows apps |
 | Sharing a single **window** in the portal | Works with Minecraft Java (XWayland): about 37 fps, freezing up to 3 s when it changes size. Native Wayland windows: not tested |
-| Several different captures at once | Not possible yet: every *Display capture* shows the same thing |
+| Several different captures at once | Works: one *Display capture* plus any number of *Link* sources, see [below](#several-captures-at-once) |
 | Going LIVE | Not verified yet |
 
 Tested on Arch Linux (Omarchy, Hyprland/Wayland, PipeWire, AMD Radeon Vega),
@@ -112,9 +112,9 @@ and only when no choice is saved. TikTok has no button to change it: open
 `tiktok-live-studio cambiar-captura` (it switches right away, even while TikTok is
 open).
 
-There is **one capture at a time**: every *Display capture*, on any Display, shows the
-same thing, because TikTok reads them all the same way. A capture that does not fill
-the frame gets black bars instead of being stretched. If a shared window stops sending
+Every *Display capture*, on any Display, shows the same thing, because TikTok reads
+them all the same way. A capture that does not fill the frame gets black bars instead
+of being stretched. If a shared window stops sending
 frames, which happens when it changes size, the helper reconnects after 3 seconds.
 
 For games, put the game in fullscreen and pick its **window** or its **screen**.
@@ -125,6 +125,42 @@ when it thinks you are AFK (*Video Settings → Inactivity FPS Limit*).
 The launcher runs the app with a copy of GE-Proton11-11 made of hard links
 (`~/.local/share/tiktok-live-studio/proton`, almost no extra disk) where only
 `winex11.so` differs; GE-Proton itself is not modified.
+
+### Several captures at once
+
+Each extra capture is a local video page that you add with TikTok's **Link** source:
+
+1. Open **Nueva captura de TikTok** from your application menu, or run
+   `tiktok-live-studio nueva-captura`, with TikTok open.
+2. Pick the screen, window or region in the share dialog.
+3. In TikTok: *Add source → Link*, paste the address (it is already copied if
+   `wl-clipboard` is installed), turn on *Custom resolution* and set 1920×1080.
+
+To change what one shows, use **Cambiar captura de TikTok**. Each source keeps its own
+address and choice, and comes back by itself when TikTok restarts while the app is still
+open. A window keeps being captured on another workspace.
+
+The portal cannot find a saved window again once its app closes. On Hyprland, run this
+once to have each capture remember its app and pick it by itself when it reopens:
+
+```sh
+tiktok-live-studio activar-deteccion
+```
+
+It sets `custom_picker_binary` in `~/.config/hypr/xdph.conf` (keeping a backup) and restarts
+the portal. While the app is closed the capture keeps its last frame and shows no dialog.
+Other apps that share your screen still get the normal dialog. Without this command, the
+share dialog opens by itself about 15 seconds after the app closes.
+
+With `xdg-desktop-portal-hyprland` 1.4, closing a captured window also crashes the portal
+(it keeps using the closed window, Hyprland drops its connection, and it fails on exit),
+which interrupts every capture for a moment. The helper restarts them when the portal
+returns. To avoid that during a LIVE, remove the source before closing the app.
+
+The address uses `lvh.me`, a public domain that resolves to `127.0.0.1`, because TikTok's
+Link field rejects IP addresses and `localhost`. Your frames stay on your machine: only
+that DNS lookup goes out, and the server listens on loopback only, behind a random path.
+Each capture adds CPU load, since it is encoded as JPEG and decoded again by TikTok.
 
 ### Rebuilding the Wine modules
 
@@ -199,9 +235,25 @@ escritorio para compartir pantalla, y solo si no hay una elección guardada: eli
 abre **Cambiar captura de TikTok** desde el menú de aplicaciones o ejecuta
 `tiktok-live-studio cambiar-captura`, aunque TikTok esté abierto.
 
-Solo hay **una captura a la vez**: todas las *Display capture*, en cualquier Display,
-muestran lo mismo, porque TikTok las lee igual. Si la captura no llena el cuadro, lleva
-barras negras en vez de estirarse.
+Todas las *Display capture*, en cualquier Display, muestran lo mismo, porque TikTok las
+lee igual. Si la captura no llena el cuadro, lleva barras negras en vez de estirarse.
+
+Para **varias capturas a la vez**, con TikTok abierto usa **Nueva captura de TikTok**
+desde el menú (o `tiktok-live-studio nueva-captura`), elige qué mostrar y, en TikTok, *Add
+source → Link*: pega la dirección, activa *Custom resolution* y pon 1920×1080. La dirección
+usa `lvh.me`, un dominio público que apunta a `127.0.0.1`, porque TikTok rechaza IP y
+`localhost`; la imagen no sale de tu máquina. Cada captura extra consume más CPU.
+
+Cada fuente conserva su dirección y su elección, y vuelve sola al reiniciar TikTok si la
+app sigue abierta. Una ventana se sigue capturando aunque esté en otro escritorio. Para que
+cada captura encuentre sola su app al cerrarla y reabrirla, en Hyprland ejecuta una vez
+`tiktok-live-studio activar-deteccion` (cambia `custom_picker_binary` en
+`~/.config/hypr/xdph.conf`, con copia de seguridad, y reinicia el portal). Sin eso, a los 15
+segundos más o menos sale el diálogo para elegirla otra vez.
+
+Con `xdg-desktop-portal-hyprland` 1.4, cerrar una ventana capturada además hace caer el
+portal y corta un momento todas las capturas, que se recuperan solas; en un LIVE, quita la
+fuente antes de cerrar la app.
 
 Para juegos (probado con Minecraft Java) elige su **ventana** o, a pantalla completa,
 su **pantalla**: llega a 25–59 fps. Si la ventana cambia de tamaño (por ejemplo con

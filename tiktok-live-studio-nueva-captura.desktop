@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Nueva captura de TikTok
+Comment=Crea otra captura de pantalla o ventana para añadirla en TikTok con la fuente Link
+Exec=tiktok-live-studio nueva-captura
+Icon=tiktok-live-studio
+Terminal=false
+Categories=AudioVideo;Video;

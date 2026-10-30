@@ -9,6 +9,11 @@
 #   tiktok-live-studio reset           borra el prefijo (se pierde la sesión)
 #   tiktok-live-studio cambiar-captura vuelve a preguntar qué mostrar en una
 #                                      "Display capture"
+#   tiktok-live-studio nueva-captura   crea otra captura y da la dirección para
+#                                      añadirla en TikTok con la fuente "Link"
+#   tiktok-live-studio activar-deteccion
+#                                      en Hyprland, hace que una captura encuentre
+#                                      sola su app cuando se cierra y se reabre
 #
 # Variables: TTLS_PREFIX (ruta del prefijo), PROTONPATH (por defecto GE-Proton11-11,
 #            que se descarga si falta; con otro valor no hay captura de pantalla),
@@ -33,6 +38,7 @@ MMDEVAPI_DLL="${TTLS_MMDEVAPI:-/usr/share/tiktok-live-studio/mmdevapi.dll}"
 # ventana raíz de X, que sale negra. Va en una copia de GE-Proton con enlaces duros.
 WINEX11_SO="${TTLS_WINEX11:-/usr/share/tiktok-live-studio/winex11.so}"
 CAPTURE_HELPER="${TTLS_CAPTURE_HELPER:-/usr/lib/tiktok-live-studio/tiktok-live-studio-capture}"
+PICKER="${TTLS_PICKER:-/usr/lib/tiktok-live-studio/tiktok-live-studio-picker}"
 CAPTURE_PROTON_DIR="$DATA_DIR/proton"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/tiktok-live-studio"
 DOWNLOAD_URL="https://www.tiktok.com/studio/download"
@@ -221,7 +227,11 @@ change_capture() {
         name=${status#"$base."}; name=${name%.status}
         n=$((n + 1))
         names+=("$name")
-        rows+=("Display $name: $(<"$status")")
+        if [[ "$name" == 1 ]]; then
+            rows+=("Display capture: $(<"$status")")
+        else
+            rows+=("Captura $name (Link): $(<"$status")")
+        fi
     done < <(find /dev/shm -maxdepth 1 -name "${base##*/}.*.status" | sort -t. -k2 -n)
 
     if ((n == 0)); then
@@ -243,9 +253,50 @@ change_capture() {
         done
     fi
     [[ -n "${slot:-}" ]] || return 1
-    rm -f -- "$CACHE_DIR/capture.$slot.token"
+    rm -f -- "$CACHE_DIR/capture.$slot.token" "$CACHE_DIR/capture.$slot.class"
     touch "$base.$slot.reset"
-    echo "Display $slot va a preguntar qué mostrar." >&2
+    echo "La captura $slot va a preguntar qué mostrar." >&2
+}
+
+# Las capturas extra son páginas locales (ver tiktok-live-studio-capture).
+new_capture() {
+    local base="/dev/shm/tiktok-live-studio-capture-$(id -u)" n=2 url i message
+
+    pgrep -f '/tiktok-live-studio-capture$' >/dev/null || die "Abre TikTok LIVE Studio primero."
+    while [[ -e "$CACHE_DIR/capture.$n.url" ]]; do n=$((n + 1)); done
+    touch "$base.$n.request"
+    for i in {1..20}; do
+        [[ -s "$base.$n.url" ]] && break
+        sleep 0.5
+    done
+    [[ -s "$base.$n.url" ]] || die "El ayudante de captura no respondió."
+    url=$(<"$base.$n.url")
+    command -v wl-copy >/dev/null && printf '%s' "$url" | wl-copy
+    message="Captura $n: elige qué mostrar en el diálogo.\n\nEn TikTok: Add source → Link → pega esta dirección (Ctrl+V)$(command -v wl-copy >/dev/null && echo ', ya está copiada'):\n\n$url\n\nActiva Custom resolution con 1920×1080 para que se vea nítida."
+    if [[ -t 2 ]] || ! command -v zenity >/dev/null; then
+        printf '%b\n' "$message" >&2
+    else
+        zenity --info --title="TikTok LIVE Studio" --text="$message" 2>/dev/null || true
+    fi
+}
+
+# El selector del portal se configura en un archivo del usuario.
+enable_detection() {
+    local conf="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/xdph.conf"
+
+    if grep -qE '^[[:space:]]*custom_picker_binary' "$conf" 2>/dev/null; then
+        grep -q "custom_picker_binary = $PICKER" "$conf" && { echo "Ya está activada." >&2; return 0; }
+        die "$conf ya usa otro selector (custom_picker_binary); cámbialo a mano por $PICKER"
+    fi
+    mkdir -p "$(dirname "$conf")"
+    [[ -f "$conf" ]] && cp "$conf" "$conf.bak.$(date +%s)"
+    if grep -qE '^[[:space:]]*screencopy[[:space:]]*\{' "$conf" 2>/dev/null; then
+        sed -i -E "0,/^[[:space:]]*screencopy[[:space:]]*\{/s||&\n    custom_picker_binary = $PICKER|" "$conf"
+    else
+        printf 'screencopy {\n    custom_picker_binary = %s\n}\n' "$PICKER" >>"$conf"
+    fi
+    systemctl --user restart xdg-desktop-portal-hyprland
+    echo "Listo: las capturas de ventana encontrarán su app al reabrirla." >&2
 }
 
 install_mmdevapi() {
@@ -279,6 +330,8 @@ case "${1:-}" in
         read -rp "¿Borrar $WINEPREFIX? [s/N] " ans
         if [[ "$ans" == [sS] ]]; then rm -rf -- "$WINEPREFIX"; echo "Prefijo borrado."; fi ;;
     cambiar-captura) change_capture ;;
+    nueva-captura) new_capture ;;
+    activar-deteccion) enable_detection ;;
     -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' ;;
     *) ensure_proton; run_app "${1:-}" ;;
 esac

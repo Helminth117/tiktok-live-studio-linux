@@ -6,12 +6,17 @@ captura al portal del escritorio (org.freedesktop.portal.ScreenCast), recibe
 los fotogramas por PipeWire y los deja en memoria compartida. El winex11.so
 parcheado los copia cuando una app lee la imagen del escritorio (BitBlt).
 
-Cada captura es una ranura con su propia elección guardada. Por ahora Wine solo
-pide la ranura 1: TikTok lee todos sus Display igual, así que no se distinguen.
-  <shm>.N          fotogramas
-  <shm>.N.request  lo crea Wine cuando esa ranura no tiene imagen
+Cada captura es una ranura con su propia elección guardada. La ranura 1 es lo que
+ve Display capture (TikTok lee todos sus Display igual, así que no se distinguen).
+Las demás se sirven como video en una página local, para añadirlas con la fuente
+Link de TikTok, que puede tener varias a la vez:
+  <shm>.N          fotogramas (solo la ranura 1)
+  <shm>.N.request  pide la captura: lo crea Wine, "nueva-captura" o la página
   <shm>.N.reset    lo crea "tiktok-live-studio cambiar-captura"
   <shm>.N.status   lo que se captura ("pantalla", "ventana", "sin elegir")
+  <shm>.N.url      dirección para la fuente Link (ranuras 2 en adelante)
+  <shm>.picking    ranura que está eligiendo, para tiktok-live-studio-picker, que
+                   recuerda la app en capture.N.class y la elige sola al reabrirla
 
 Una captura empieza cuando aparece .request y se detiene si nadie lee durante
 IDLE_TIMEOUT segundos.
@@ -26,12 +31,18 @@ Formato de los fotogramas (little endian):
 """
 
 import glob
+import json
 import mmap
 import os
 import random
+import secrets
+import signal
 import struct
+import subprocess
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import gi
 
@@ -51,6 +62,27 @@ PORTAL = "org.freedesktop.portal.Desktop"
 PORTAL_PATH = "/org/freedesktop/portal/desktop"
 SCREENCAST = "org.freedesktop.portal.ScreenCast"
 SOURCE_TYPES = {1: "pantalla", 2: "ventana"}
+BASE_PORT = 8700
+# TikTok rechaza IP y localhost en Link; este dominio público apunta a 127.0.0.1.
+LINK_HOST = "lvh.me"
+# Termina de cargar antes de pedir el video: TikTok no muestra una página que sigue
+# cargando, y un video sin fin la dejaría así para siempre.
+LINK_PAGE = b"""<!doctype html><html><body style="margin:0;background:#000;height:100vh;overflow:hidden">
+<img id="v" style="width:100%;height:100%;object-fit:contain;display:block"><script>
+var v = document.getElementById("v");
+function play() { v.src = "stream?" + Date.now(); }
+v.onerror = function () { setTimeout(play, 2000); };
+// Un video que se corta no da error: la imagen solo se queda quieta. Este canal avisa.
+function watch() {
+  var events = new EventSource("events"), lost = false;
+  events.onerror = function () {
+    lost = true;
+    if (events.readyState == 2) setTimeout(watch, 2000);
+  };
+  events.onopen = function () { if (lost) { lost = false; play(); } };
+}
+addEventListener("load", function () { setTimeout(function () { play(); watch(); }, 0); });
+</script></body></html>"""
 
 
 def remove(path):
@@ -89,20 +121,50 @@ class Shm:
         struct.pack_into("<IIII", self.map, 12, 0, 0, 0, 0)
 
 
+class LinkFrames:
+    """Lo mismo que Shm para una ranura servida por HTTP: guarda el último JPEG."""
+
+    def __init__(self):
+        self.frame = None
+        self.count = 0
+        self.clients = 0
+        self.left = 0
+        self.changed = threading.Condition()
+
+    def clear(self):
+        pass
+
+    def last_read(self):
+        with self.changed:
+            return time.clock_gettime(time.CLOCK_MONOTONIC) * 1000 if self.clients else self.left
+
+
 class Capture:
+    # Lo que sigue a videoflip en el pipeline
+    TAIL = "video/x-raw,format=BGRx ! appsink name=sink emit-signals=true max-buffers=1 drop=true sync=false"
+    LABEL = "Display capture"
+
     def __init__(self, name, bus):
         self.name = name
         self.path = f"{SHM}.{name}"
         self.token = os.path.join(CACHE, f"capture.{name}.token")
-        self.shm = Shm(self.path)
+        self.shm = self._frames()
         self.bus = bus
         self.sender = self.bus.get_unique_name()[1:].replace(".", "_")
         self.session = None
         self.pipeline = None
         self.active = False
+        self.size = None
         self.waiting = False    # el portal está preguntando o respondiendo
         self.cancelled = False  # no volver a preguntar hasta cambiar-captura
+        self.stalls = 0         # intentos seguidos sin recibir ningún fotograma
+        self.class_file = os.path.join(CACHE, f"capture.{name}.class")
+        self.waiting_app = False  # la app elegida está cerrada
+        self.next_check = 0.0
         self.started = 0.0
+
+    def _frames(self):
+        return Shm(self.path)
 
     # -- portal ----------------------------------------------------------
     def _request(self, method, args, callback):
@@ -126,9 +188,36 @@ class Capture:
         return {"CreateSession": "(a{sv})", "SelectSources": "(oa{sv})",
                 "Start": "(osa{sv})"}[method]
 
+    def _saved_class(self):
+        try:
+            with open(self.class_file) as f:
+                return f.read().strip()
+        except OSError:
+            return ""
+
+    def _app_open(self):
+        try:
+            clients = subprocess.run(["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=2)
+            return any(c.get("class") == self._saved_class() for c in json.loads(clients.stdout))
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return False
+
     def start(self):
         if self.active:
             return
+        # Una app recordada no se pregunta: se espera y se elige sola al abrirse.
+        if self._saved_class() and not self._app_open():
+            if not self.waiting_app:
+                log(f"{self.name}: esperando a que se abra {self._saved_class()}")
+                self._set_status(f"esperando a {self._saved_class()}")
+            self.waiting_app = True
+            return
+        if self.waiting_app:
+            # Lo guardado apunta a la ventana que se cerró; sin ello, el selector elige.
+            remove(self.token)
+        self.waiting_app = False
+        with open(SHM + ".picking", "w") as f:
+            f.write(self.name + "\n")
         self.active = True
         self.waiting = True
         self.started = time.monotonic()
@@ -164,7 +253,9 @@ class Capture:
             os.makedirs(CACHE, exist_ok=True)
             with open(self.token, "w") as f:
                 f.write(results["restore_token"])
+        remove(SHM + ".picking")
         self.node, props = results["streams"][0]
+        self.size = props.get("size")
         self._set_status(SOURCE_TYPES.get(props.get("source_type"), "captura"))
         self.waiting = False
         self._open_stream()
@@ -181,6 +272,11 @@ class Capture:
         if code == 2:
             remove(self.token)      # un permiso guardado que ya no vale
         self.stop()
+        if self._saved_class():
+            # El selector no eligió porque la app se acaba de cerrar; tick() reintenta.
+            self.waiting_app = True
+            self.next_check = time.monotonic() + 2
+            return
         self.cancelled = code == 1  # si no, Wine lo pediría y el diálogo volvería a salir
         self._set_status("sin elegir")
 
@@ -194,7 +290,7 @@ class Capture:
             self.bus.call_sync("org.freedesktop.Notifications", "/org/freedesktop/Notifications",
                                "org.freedesktop.Notifications", "Notify",
                                GLib.Variant("(susssasa{sv}i)", ("TikTok LIVE Studio", 0, "tiktok-live-studio",
-                                            "Display capture", "Elige qué mostrar en Display capture",
+                                            "Display capture", f"Elige qué mostrar en {self.LABEL}",
                                             [], {}, 5000)),
                                None, Gio.DBusCallFlags.NONE, 1000, None)
         except GLib.Error:
@@ -203,31 +299,57 @@ class Capture:
     # -- PipeWire -> memoria compartida ------------------------------------
     def _start_pipeline(self, fd, node):
         # PipeWire entrega los monitores girados sin girar, con la rotación como
-        # metadato; videoflip method=automatic la aplica.
+        # metadato; videoflip method=automatic la aplica. Ese metadato puede venir
+        # mal (rotate-270 en un monitor sin rotar), ver _check_rotation.
         # Cuando xdph 1.4 renegocia el flujo de una ventana puede quedarse en "Out
         # of buffers" sin entregar más fotogramas; restart_stream() lo reconecta.
         self.pipeline = Gst.parse_launch(
             f"pipewiresrc fd={fd} path={node} always-copy=true do-timestamp=true ! "
-            "videoconvert ! videoflip method=automatic ! video/x-raw,format=BGRx ! "
-            "appsink name=sink emit-signals=true max-buffers=1 drop=true sync=false")
+            f"videoconvert ! videoflip name=flip method=automatic ! {self.TAIL}")
         self.pipeline.get_by_name("sink").connect("new-sample", self._on_sample)
+        flip = self.pipeline.get_by_name("flip")
+        flip.get_static_pad("sink").add_probe(Gst.PadProbeType.EVENT_DOWNSTREAM, self._check_rotation, flip)
         self.pipeline.get_bus().add_signal_watch()
         self.pipeline.get_bus().connect("message::error", self._on_error)
         self.last_frame = time.monotonic()
         self.pipeline.set_state(Gst.State.PLAYING)
         log(f"{self.name}: capturando el nodo {node} de PipeWire")
 
+    def _check_rotation(self, _pad, info, flip):
+        # Girar solo si el fotograma no tiene la forma que informa el portal.
+        event = info.get_event()
+        if event.type == Gst.EventType.CAPS and self.size:
+            caps = event.parse_caps().get_structure(0)
+            same = (caps.get_value("width") > caps.get_value("height")) == (self.size[0] > self.size[1])
+            flip.set_property("method", "none" if same else "automatic")
+        return Gst.PadProbeReturn.OK
+
     def stalled(self):
-        # Una pantalla quieta tampoco manda fotogramas; reconectar no le hace daño.
         return self.pipeline and time.monotonic() - self.last_frame > STALL_TIMEOUT
 
-    def restart_stream(self):
-        log(f"{self.name}: sin fotogramas; se reconecta el flujo")
-        self.pipeline.set_state(Gst.State.NULL)
-        self._open_stream()
+    def recover(self):
+        # xdph deja de entregar fotogramas si la ventana cambia de tamaño, y su proceso
+        # se cae (SIGSEGV) si se cierra. Una elección guardada de una ventana que ya no
+        # existe tampoco falla: da un flujo vacío, así que solo queda volver a preguntar.
+        self.stalls += 1
+        if self.stalls == 1:
+            log(f"{self.name}: sin fotogramas; se reconecta el flujo")
+            self.pipeline.set_state(Gst.State.NULL)
+            self._open_stream()
+            return
+        self.stop()
+        if self.stalls == 2:
+            log(f"{self.name}: sigue sin fotogramas; se reinicia la sesión")
+        else:
+            log(f"{self.name}: lo elegido ya no está disponible")
+            # Con la app recordada abierta, el selector la elige sin preguntar.
+            remove(self.token)
+            self.stalls = 0
+        self.start()
 
     def _on_sample(self, sink):
         self.last_frame = time.monotonic()
+        self.stalls = 0
         sample = sink.emit("pull-sample")
         caps = sample.get_caps().get_structure(0)
         width, height = caps.get_value("width"), caps.get_value("height")
@@ -252,21 +374,28 @@ class Capture:
         if self.session:
             try:
                 self.bus.call_sync(PORTAL, self.session, "org.freedesktop.portal.Session", "Close",
-                                   None, None, Gio.DBusCallFlags.NONE, -1, None)
+                                   None, None, Gio.DBusCallFlags.NONE, 1000, None)
             except GLib.Error:
                 pass
             self.session = None
         self.shm.clear()
         remove(self.path + ".request")
         remove(self.path + ".status")
+        if self.waiting:
+            remove(SHM + ".picking")
         self.active = False
         self.waiting = False
+
+    def wanted(self):
+        return os.path.exists(self.path + ".request")
 
     def tick(self, others_waiting):
         # "cambiar-captura": se suelta la fuente actual y, en cuanto Wine vuelva a
         # pedir la imagen, el portal pregunta de nuevo.
         if os.path.exists(self.path + ".reset"):
             remove(self.path + ".reset")
+            remove(self.class_file)
+            self.waiting_app = False
             self.cancelled = False
             if self.active:
                 log(f"{self.name}: cambio de fuente pedido")
@@ -274,12 +403,16 @@ class Capture:
             return
         if self.cancelled:
             remove(self.path + ".request")
+        elif self.waiting_app:
+            if time.monotonic() >= self.next_check and not others_waiting:
+                self.next_check = time.monotonic() + 2
+                self.start()
         elif not self.active:
             # Un diálogo a la vez: el portal no dice para cuál fuente pregunta.
-            if os.path.exists(self.path + ".request") and not others_waiting:
+            if self.wanted() and not others_waiting:
                 self.start()
         elif self.stalled():
-            self.restart_stream()
+            self.recover()
         elif not self.waiting and time.monotonic() - self.started > IDLE_TIMEOUT:
             idle = time.clock_gettime(time.CLOCK_MONOTONIC) * 1000 - self.shm.last_read()
             if idle > IDLE_TIMEOUT * 1000:
@@ -287,7 +420,154 @@ class Capture:
                 self.stop()
 
 
+class LinkCapture(Capture):
+    """Ranura servida como página local para la fuente Link de TikTok."""
+    TAIL = ("videorate drop-only=true max-rate=30 ! video/x-raw,format=I420 ! jpegenc quality=85 ! "
+            "appsink name=sink emit-signals=true max-buffers=1 drop=true sync=false")
+
+    def __init__(self, name, bus):
+        self.LABEL = f"Captura {name}"
+        super().__init__(name, bus)
+        # El secreto evita que otro usuario o página de esta máquina vea la captura.
+        secret_file = os.path.join(CACHE, f"capture.{name}.url")
+        try:
+            with open(secret_file) as f:
+                secret = f.read().strip()
+        except OSError:
+            secret = secrets.token_urlsafe(9).replace("-", "a").replace("_", "b")
+            os.makedirs(CACHE, exist_ok=True)
+            with open(secret_file, "w") as f:
+                f.write(secret + "\n")
+        port = BASE_PORT + int(name)
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", port), self._handler(f"/{secret}/"))
+        except OSError as err:
+            log(f"{name}: no se puede usar el puerto {port}: {err}")
+            return
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        with open(self.path + ".url", "w") as f:
+            f.write(f"http://{LINK_HOST}:{port}/{secret}/\n")
+
+    def _frames(self):
+        return LinkFrames()
+
+    def _on_sample(self, sink):
+        self.last_frame = time.monotonic()
+        self.stalls = 0
+        buf = sink.emit("pull-sample").get_buffer()
+        ok, info = buf.map(Gst.MapFlags.READ)
+        if ok:
+            with self.shm.changed:
+                self.shm.frame = bytes(info.data)
+                self.shm.count += 1
+                self.shm.changed.notify_all()
+            buf.unmap(info)
+        return Gst.FlowReturn.OK
+
+    def wanted(self):
+        return super().wanted() or self.shm.clients > 0
+
+    def _request_capture(self):
+        open(self.path + ".request", "a").close()
+
+    def _handler(self, root):
+        capture, frames = self, self.shm
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                path = self.path.split("?")[0]
+                if path == root:
+                    capture._request_capture()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(LINK_PAGE)))
+                    self.end_headers()
+                    self.wfile.write(LINK_PAGE)
+                elif path == root + "stream":
+                    capture._request_capture()
+                    self._stream()
+                elif path == root + "events":
+                    self._events()
+                else:
+                    self.send_error(404)
+
+            def _events(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                try:
+                    while True:
+                        self.wfile.write(b": sigue\n\n")
+                        self.wfile.flush()
+                        time.sleep(5)
+                except OSError:
+                    pass
+
+            def _stream(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                count = 0
+                with frames.changed:
+                    frames.clients += 1
+                try:
+                    while True:
+                        with frames.changed:
+                            frames.changed.wait_for(lambda: frames.count != count, timeout=2)
+                            count, frame = frames.count, frames.frame
+                        if frame:
+                            self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n"
+                                             % len(frame) + frame + b"\r\n")
+                except OSError:
+                    pass
+                finally:
+                    with frames.changed:
+                        frames.clients -= 1
+                        frames.left = time.clock_gettime(time.CLOCK_MONOTONIC) * 1000
+
+        return Handler
+
+
+def new_capture(name, bus):
+    return Capture(name, bus) if name == "1" else LinkCapture(name, bus)
+
+
+def supervise():
+    """Vuelve solo en el proceso hijo, y lo reinicia si se cae.
+
+    El plugin de PipeWire de GStreamer puede morir por SIGSEGV en su propio hilo cuando el
+    portal se cae, sin que Python pueda evitarlo. Las capturas se recuperan de lo guardado.
+    """
+    child = 0
+
+    def forward(signum, _frame):
+        if child:
+            os.kill(child, signum)
+
+    signal.signal(signal.SIGTERM, forward)
+    signal.signal(signal.SIGINT, forward)
+    while True:
+        child = os.fork()
+        if child == 0:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            signal.signal(signal.SIGINT, signal.default_int_handler)
+            return
+        _pid, status = os.waitpid(child, 0)
+        if not os.WIFSIGNALED(status) or os.WTERMSIG(status) in (signal.SIGTERM, signal.SIGINT):
+            sys.exit(0)
+        log(f"se cayó con la señal {os.WTERMSIG(status)}; se reinicia")
+        time.sleep(1)
+
+
 def main():
+    supervise()
+    parent = os.getppid()
     Gst.init(None)
     loop = GLib.MainLoop()
     bus = Gio.bus_get_sync(Gio.BusType.SESSION)
@@ -298,21 +578,43 @@ def main():
     remove(os.path.join(CACHE, "capture.token"))
 
     # De una sesión anterior: sin esto saldría el diálogo sin haber añadido la fuente.
-    for path in glob.glob(glob.escape(SHM) + ".*.request") + glob.glob(glob.escape(SHM) + ".*.reset") \
-            + glob.glob(glob.escape(SHM) + ".*.status"):
-        remove(path)
+    remove(SHM + ".picking")
+    for kind in ("request", "reset", "status", "url"):
+        for path in glob.glob(f"{glob.escape(SHM)}.*.{kind}"):
+            remove(path)
     # Crear la captura vacía los fotogramas viejos: si no, Wine los daría por buenos
     # y nunca pediría una captura nueva.
-    for path in glob.glob(glob.escape(SHM) + ".*"):
-        name = path[len(SHM) + 1:]
-        if "." not in name and name.isdigit():
-            captures[name] = Capture(name, bus)
+    if os.path.exists(SHM + ".1"):
+        captures["1"] = new_capture("1", bus)
+    # Las fuentes Link de otras sesiones tienen que encontrar su página.
+    for path in glob.glob(glob.escape(os.path.join(CACHE, "capture.")) + "*.url"):
+        name = os.path.basename(path).split(".")[1]
+        if name.isdigit() and name not in captures:
+            captures[name] = new_capture(name, bus)
+
+    # El portal se cae si se cierra una ventana capturada; las demás capturas no tienen
+    # por qué esperar a notar que dejaron de llegar fotogramas.
+    def portal_changed(_conn, _sender, _path, _iface, _signal, params):
+        if params.unpack()[2]:
+            log("el portal se reinició; se recuperan las capturas")
+            # tick() las reinicia de una en una: varias a la vez también tumban el portal.
+            for capture in captures.values():
+                if capture.active:
+                    capture.stop()
+                # Un diálogo que se cerró con la caída no es que el usuario cancelara.
+                capture.cancelled = capture.cancelled and not capture._saved_class()
+
+    bus.signal_subscribe("org.freedesktop.DBus", "org.freedesktop.DBus", "NameOwnerChanged",
+                         "/org/freedesktop/DBus", "org.freedesktop.impl.portal.desktop.hyprland",
+                         Gio.DBusSignalFlags.NONE, portal_changed)
 
     def tick():
+        if os.getppid() != parent:
+            loop.quit()
         for path in glob.glob(glob.escape(SHM) + ".*.request"):
             name = path[len(SHM) + 1:-len(".request")]
             if name not in captures:
-                captures[name] = Capture(name, bus)
+                captures[name] = new_capture(name, bus)
         waiting = any(c.waiting for c in captures.values())
         for capture in captures.values():
             capture.tick(waiting)

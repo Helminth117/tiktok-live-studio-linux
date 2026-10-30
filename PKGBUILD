@@ -1,6 +1,6 @@
 # Maintainer: Joseph <joseph62937@gmail.com>
 pkgname=tiktok-live-studio-wine
-pkgver=1.4.0
+pkgver=1.6.4
 pkgrel=1
 pkgdesc="TikTok LIVE Studio (Windows) en Linux mediante umu-launcher/Proton"
 arch=('x86_64')
@@ -12,6 +12,7 @@ depends=('bash' 'curl' 'jq' 'umu-launcher' 'xdg-user-dirs' 'xdg-utils'
          'python' 'python-gobject' 'gstreamer' 'gst-plugins-base' 'gst-plugins-good'
          'gst-plugin-pipewire' 'xdg-desktop-portal')
 optdepends=('zenity: diálogos al iniciar desde el menú de aplicaciones'
+            'wl-clipboard: copiar la dirección de cada captura nueva'
             'xdg-desktop-portal-hyprland: captura de pantalla en Hyprland'
             'xdg-desktop-portal-wlr: captura de pantalla en Sway y otros wlroots'
             'xdg-desktop-portal-gnome: captura de pantalla en GNOME'
@@ -19,17 +20,21 @@ optdepends=('zenity: diálogos al iniciar desde el menú de aplicaciones'
 options=('!strip' '!debug')
 source=('tiktok-live-studio'
         'tiktok-live-studio-capture'
+        'tiktok-live-studio-picker'
         'tiktok-live-studio.desktop'
         'tiktok-live-studio-cambiar-captura.desktop'
+        'tiktok-live-studio-nueva-captura.desktop'
         'tiktok-live-studio.svg'
         'mmdevapi.dll'
         'mmdevapi-device-topology.patch'
         'winex11.so'
         'winex11-screen-capture.patch')
-sha256sums=('43be92dc796fe9ed432c998f608b9cf829a337cbb4fff48f3c0022d93586037f'
-            'dac5ae7cd82cf3b2899caf6159da339032549613ca4ff982d6826e9168abe9b9'
+sha256sums=('a6494660da65ba16b7fa5690dc7b1deda80e235185f78be3bda21ab338bfef62'
+            '799e160bc4f10e1412803f52032666b5855186e37256e26c47a0d59b590d6920'
+            '816443a198dc73e7cf9cba0c7a18df95c71ae6f2ae7e70a9e324fa6c4871cf9b'
             '456ef04418a8ce085bfbeb5f0ac3ba06e71382e6bdebccb8653f01a43f3fbf48'
             '8695816749bb38a351b6bd7c44d5fd1d2f6c4c6e80038c9c8e1360ef9c92ac5f'
+            'a8e3c4f3c3e33f99d68244a43a5fc8ff6fb59d1a3da4505465da4b47bb68f768'
             'a8ec3a4b88bf16dd1af1c8b97c51ec9143d1005269276935adee67ec79626417'
             '668fb71bc5bc7599301f6bde780188aa0c4b6f2e1f74ce15fc183d1650fb2e15'
             '5c17760dfa02a772b1c4963cbe412345e1ff726390f63012d161eb3f3be09144'
@@ -39,8 +44,10 @@ sha256sums=('43be92dc796fe9ed432c998f608b9cf829a337cbb4fff48f3c0022d93586037f'
 package() {
   install -Dm755 tiktok-live-studio "$pkgdir/usr/bin/tiktok-live-studio"
   install -Dm755 tiktok-live-studio-capture "$pkgdir/usr/lib/tiktok-live-studio/tiktok-live-studio-capture"
+  install -Dm755 tiktok-live-studio-picker "$pkgdir/usr/lib/tiktok-live-studio/tiktok-live-studio-picker"
   install -Dm644 tiktok-live-studio.desktop "$pkgdir/usr/share/applications/tiktok-live-studio.desktop"
   install -Dm644 tiktok-live-studio-cambiar-captura.desktop "$pkgdir/usr/share/applications/tiktok-live-studio-cambiar-captura.desktop"
+  install -Dm644 tiktok-live-studio-nueva-captura.desktop "$pkgdir/usr/share/applications/tiktok-live-studio-nueva-captura.desktop"
   install -Dm644 tiktok-live-studio.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/tiktok-live-studio.svg"
   install -Dm644 mmdevapi.dll "$pkgdir/usr/share/tiktok-live-studio/mmdevapi.dll"
   install -Dm644 mmdevapi-device-topology.patch "$pkgdir/usr/share/tiktok-live-studio/mmdevapi-device-topology.patch"
