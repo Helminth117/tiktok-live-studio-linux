@@ -22,14 +22,15 @@ Wine fix that makes **microphones and speakers work** inside the app.
 
 | Feature | State |
 |---|---|
-| Install / auto-update | Works (installer runs silently; its GUI renders black under Proton) |
+| Install / updates | Works: the launcher installs TikTok's offered version silently before opening the app (the installer's GUI renders black under Proton) |
 | Login, studio UI | Works |
 | Microphone / speakers | Works with the patched `mmdevapi.dll` from this repo |
 | Camera (webcam) | Works |
 | Display capture (screen or a window) | Works with the patched `winex11.so` and the capture helper |
-| Games (tested: Minecraft Java) | *Display capture* → pick the game's **screen** (game fullscreen) or a **region**: 25–50 fps, as fast as the game draws |
+| Games (tested: Minecraft Java) | *Display capture* → pick the game's **window** or **screen** (game fullscreen): 25–59 fps, as fast as the game draws. A **region** works too, with black bars if it does not fill the frame |
 | TikTok's own *Window capture* / *Game capture* | Do not work: they inject into Windows processes and only see Windows apps |
-| Sharing a single **window** in the portal | Native Wayland windows: not tested. XWayland windows (Minecraft Java, most games): no frames with `xdg-desktop-portal-hyprland` 1.4 |
+| Sharing a single **window** in the portal | Works with Minecraft Java (XWayland): about 37 fps, freezing up to 3 s when it changes size. Native Wayland windows: not tested |
+| Several different captures at once | Not possible yet: every *Display capture* shows the same thing |
 | Going LIVE | Not verified yet |
 
 Tested on Arch Linux (Omarchy, Hyprland/Wayland, PipeWire, AMD Radeon Vega),
@@ -53,7 +54,16 @@ On first launch the launcher:
    drops the connection, which it does on long downloads),
 3. installs it silently into its own prefix,
    `~/.local/share/tiktok-live-studio/prefix`,
-4. starts the app with GE-Proton11-11 (umu downloads it the first time).
+4. starts the app with GE-Proton11-11 (the launcher downloads it the first time and
+   checks its SHA-512).
+
+On every later launch it compares the installed version with the one TikTok's
+server offers. If they differ, it downloads and installs that one silently before
+opening the app, which avoids the app's own updater: a download window that cannot
+be closed, followed by an installer that renders black. It follows the server even
+to an older version, because the app would ask for that one anyway. Without network
+it opens what is installed. Your session is kept. If the server changes while the
+app is open, the app's own updater can still appear; close it and launch again.
 
 Other commands: `tiktok-live-studio install [EXE]`, `winecfg`, `winetricks ...`,
 `reset` (deletes the prefix and your session). See `tiktok-live-studio --help`.
@@ -76,7 +86,7 @@ virtual adapter (`{2}.\\?\root#media#0000#{6994ad04-…}\wave`).
 The launcher copies `mmdevapi.dll` into the prefix's `system32` and loads it
 with `WINEDLLOVERRIDES=mmdevapi=n,b`, so GE-Proton itself is not modified.
 Because the DLL is built against GE-Proton11-11's exact Wine tree, the launcher
-pins `PROTONPATH=GE-Proton11-11`.
+downloads that exact release and points `PROTONPATH` at its folder.
 
 Also needed: Wine ≥ 10.15. TikTok's network library imports
 `IPHLPAPI.SetPerTcp6ConnectionEStats`, so UMU-Proton 10.0 aborts at start.
@@ -96,15 +106,20 @@ fills it: the first time TikTok reads the desktop it asks the
 over PipeWire (rotated monitors are straightened). It stops when nothing reads
 for 15 s.
 
-In TikTok: *Add source → Display capture*. The choice is remembered; run
-`tiktok-live-studio cambiar-captura` to be asked again (it switches right away,
-even while TikTok is open).
+In TikTok: *Add source → Display capture*. Only this source opens the share dialog,
+and only when no choice is saved. TikTok has no button to change it: open
+**Cambiar captura de TikTok** from your application menu, or run
+`tiktok-live-studio cambiar-captura` (it switches right away, even while TikTok is
+open).
 
-For games, put the game in fullscreen and pick its **screen**, or use the
-**Region** tab. Sharing a single window of an XWayland app (Minecraft Java and
-most games) delivers no frames with `xdg-desktop-portal-hyprland` 1.4: with
-shared memory it loops on "Out of buffers", and with DMA-BUF GStreamer's
-`glupload` fails to import the frames. Minecraft also lowers its own frame rate
+There is **one capture at a time**: every *Display capture*, on any Display, shows the
+same thing, because TikTok reads them all the same way. A capture that does not fill
+the frame gets black bars instead of being stretched. If a shared window stops sending
+frames, which happens when it changes size, the helper reconnects after 3 seconds.
+
+For games, put the game in fullscreen and pick its **window** or its **screen**.
+Minecraft Java (XWayland) worked at about 37 fps as a window. Resizing it, for example
+with F11, freezes the image for up to 3 seconds. Minecraft also lowers its own frame rate
 when it thinks you are AFK (*Video Settings → Inactivity FPS Limit*).
 
 The launcher runs the app with a copy of GE-Proton11-11 made of hard links
@@ -125,6 +140,8 @@ Needs `clang`, `lld`, `bison`, `flex`, `autoconf` and the X11 headers.
 - **Microphone far too sensitive**: check `pactl list sources`. If *Base Volume*
   is low (e.g. 10%) and the volume is high, the extra percentage is hardware
   boost. Lower it: `pactl set-source-volume @DEFAULT_SOURCE@ 30%`.
+- **Display capture in red, "No video signal"**: the source remembers the monitor it
+  was added on. After connecting or removing a monitor, add a new *Display capture*.
 - **Generic icon in the menu (Omarchy)**: the shell indexes icons when it
   starts; run `omarchy-restart-shell` after installing.
 - **Logs**: `~/.local/share/tiktok-live-studio/prefix/drive_c/users/steamuser/AppData/Roaming/TikTok LIVE Studio/logs/`.
@@ -158,6 +175,14 @@ Después abre **TikTok LIVE Studio** desde el menú o ejecuta `tiktok-live-studi
 La primera vez descarga el instalador oficial (verificando su MD5), lo instala
 en `~/.local/share/tiktok-live-studio/prefix` y arranca la app con GE-Proton11-11.
 
+En cada arranque compara la versión instalada con la que ofrece el servidor de
+TikTok. Si son distintas, la descarga y la instala en silencio antes de abrir la
+app; así se evita el actualizador de la app, con su ventana de descarga que no se
+puede cerrar y su instalador en negro. Sigue al servidor aunque ofrezca una versión
+anterior, porque la app la pediría de todos modos. Sin red abre lo que ya está
+instalado. La sesión se conserva. Si el servidor cambia con la app abierta, aún
+puede salir el actualizador de la app: ciérrala y vuelve a abrirla.
+
 ### El arreglo de audio
 
 Sin `mmdevapi.dll` parcheada, el mezclador muestra «Default device (No audio
@@ -168,15 +193,21 @@ DLL al prefijo y la carga solo para esta app, sin modificar GE-Proton.
 
 ### Captura de pantalla y ventanas
 
-En TikTok usa *Add source → Display capture*. La primera vez aparece el diálogo
-de tu escritorio para compartir pantalla: elige **una pantalla o una ventana**.
-La elección se recuerda; `tiktok-live-studio cambiar-captura` hace que vuelva a
-preguntar, aunque TikTok esté abierto. Para juegos (probado con Minecraft Java)
-pon el juego en pantalla completa y elige su **pantalla**, o usa la pestaña
-**Region**: llega a 25–50 fps. Compartir una sola **ventana** de XWayland (como
-Minecraft) no envía imagen con `xdg-desktop-portal-hyprland` 1.4. Las fuentes
-*Window capture* y *Game capture* propias de TikTok no
-funcionan (solo ven apps de Windows).
+En TikTok usa *Add source → Display capture*. Solo esta fuente abre el diálogo de tu
+escritorio para compartir pantalla, y solo si no hay una elección guardada: elige
+**una pantalla, una ventana o una región**. TikTok no tiene un botón para cambiarla:
+abre **Cambiar captura de TikTok** desde el menú de aplicaciones o ejecuta
+`tiktok-live-studio cambiar-captura`, aunque TikTok esté abierto.
+
+Solo hay **una captura a la vez**: todas las *Display capture*, en cualquier Display,
+muestran lo mismo, porque TikTok las lee igual. Si la captura no llena el cuadro, lleva
+barras negras en vez de estirarse.
+
+Para juegos (probado con Minecraft Java) elige su **ventana** o, a pantalla completa,
+su **pantalla**: llega a 25–59 fps. Si la ventana cambia de tamaño (por ejemplo con
+F11), la imagen se congela hasta 3 segundos y se recupera sola. Las fuentes
+*Window capture* y *Game capture* propias de TikTok no funcionan con juegos de Linux
+(solo ven apps de Windows).
 
 Funciona así: Wine no tiene las APIs de captura de Windows y TikTok termina
 leyendo el escritorio con GDI, que en Wayland sale negro. El `winex11.so`
@@ -189,6 +220,8 @@ PipeWire.
 - **Micrófono demasiado sensible**: si en `pactl list sources` el *Base Volume*
   es bajo (por ejemplo 10 %) y el volumen alto, ese extra es ganancia de
   hardware. Bájalo: `pactl set-source-volume @DEFAULT_SOURCE@ 30%`.
+- **Display capture en rojo, «No video signal»**: la fuente recuerda el monitor donde
+  se añadió. Si conectas o quitas un monitor, añade una *Display capture* nueva.
 - **Icono genérico en el menú (Omarchy)**: la shell indexa los iconos al
   arrancar; ejecuta `omarchy-restart-shell` después de instalar.
 - **No aparece el diálogo para compartir pantalla**: revisa que tengas un portal

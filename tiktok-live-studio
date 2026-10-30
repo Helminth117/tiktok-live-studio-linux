@@ -2,13 +2,13 @@
 # Lanzador de TikTok LIVE Studio (Windows) en Linux mediante umu-launcher/Proton.
 #
 # Uso:
-#   tiktok-live-studio                 abre la app (la instala si hace falta)
+#   tiktok-live-studio                 abre la app (la instala o actualiza si hace falta)
 #   tiktok-live-studio install [EXE]   ejecuta el instalador oficial en el prefijo
 #   tiktok-live-studio winecfg         abre winecfg del prefijo
 #   tiktok-live-studio winetricks ...  ejecuta winetricks en el prefijo
 #   tiktok-live-studio reset           borra el prefijo (se pierde la sesión)
-#   tiktok-live-studio cambiar-captura vuelve a preguntar qué pantalla o ventana
-#                                      compartir en "Display capture"
+#   tiktok-live-studio cambiar-captura vuelve a preguntar qué mostrar en una
+#                                      "Display capture"
 #
 # Variables: TTLS_PREFIX (ruta del prefijo), PROTONPATH (por defecto GE-Proton11-11,
 #            que se descarga si falta; con otro valor no hay captura de pantalla),
@@ -182,6 +182,72 @@ install_app() {
     find_app >/dev/null || die "El instalador terminó pero no se encontró TikTok LIVE Studio en el prefijo."
 }
 
+app_running() {
+    # Con awk se lee todo ps: "grep -q" lo cortaría y pipefail daría falso negativo.
+    ps -eo args= | awk '/^[Cc]:\\.*TikTok LIVE Studio\.exe/ { found = 1 } END { exit !found }'
+}
+
+# El actualizador de la app abre una descarga que no se puede cerrar y luego su
+# instalador, que con Proton se dibuja en negro. Se adelanta instalando aquí, en
+# silencio, la versión que ofrece el servidor (también si es una anterior, como
+# cuando TikTok retira una versión: la app pediría volver a ella de todos modos).
+# Sin red o si algo falla, abre la versión que ya está instalada.
+update_app() {
+    local config latest current installer
+
+    app_running && return 0
+    config=$(dirname "$(find_app)")/launcher_config.json
+    current=$(jq -r '.cur_path // empty' "$config" 2>/dev/null) || return 0
+    latest=$(curl -fsS --max-time 15 "$SETTINGS_URL" |
+        jq -r '.data.settings.live_studio_downloader_windows.version // empty') || return 0
+    [[ -n "$current" && "$latest" == [0-9]* && "$latest" != "$current" ]] || return 0
+
+    echo "Actualizando TikTok LIVE Studio de $current a $latest ..." >&2
+    installer=$(fetch_installer) || { echo "aviso: no se pudo descargar $latest; se abre $current" >&2; return 0; }
+    if [[ -t 2 ]] || ! command -v zenity >/dev/null; then
+        install_app "$installer"
+    else
+        install_app "$installer" 2>/dev/null | zenity --progress --pulsate --auto-close --no-cancel \
+            --title="TikTok LIVE Studio" --text="Instalando la versión $latest ..." 2>/dev/null
+    fi
+}
+
+# Cada Display capture es una ranura del ayudante (ver tiktok-live-studio-capture).
+change_capture() {
+    local base="/dev/shm/tiktok-live-studio-capture-$(id -u)" status name slot choice i n=0
+    local -a names=() rows=()
+
+    while read -r status; do
+        name=${status#"$base."}; name=${name%.status}
+        n=$((n + 1))
+        names+=("$name")
+        rows+=("Display $name: $(<"$status")")
+    done < <(find /dev/shm -maxdepth 1 -name "${base##*/}.*.status" | sort -t. -k2 -n)
+
+    if ((n == 0)); then
+        if [[ -t 2 ]] || ! command -v zenity >/dev/null; then
+            echo "No hay ninguna Display capture activa: abre TikTok y añade una." >&2
+        else
+            zenity --info --title="TikTok LIVE Studio" --text="No hay ninguna Display capture activa: abre TikTok y añade una." 2>/dev/null
+        fi
+        return 1
+    elif ((n == 1)); then
+        slot=${names[0]}
+    elif [[ ! -t 0 ]] && command -v zenity >/dev/null; then
+        choice=$(zenity --list --title="TikTok LIVE Studio" --text="¿Qué fuente quieres cambiar?" \
+            --column="Fuente" "${rows[@]}" 2>/dev/null) || return 1
+        for ((i = 0; i < n; i++)); do [[ "${rows[i]}" == "$choice" ]] && slot=${names[i]}; done
+    else
+        select choice in "${rows[@]}"; do
+            [[ -n "$choice" ]] && { slot=${names[REPLY - 1]}; break; }
+        done
+    fi
+    [[ -n "${slot:-}" ]] || return 1
+    rm -f -- "$CACHE_DIR/capture.$slot.token"
+    touch "$base.$slot.reset"
+    echo "Display $slot va a preguntar qué mostrar." >&2
+}
+
 install_mmdevapi() {
     local dst="$WINEPREFIX/drive_c/windows/system32/mmdevapi.dll"
 
@@ -194,7 +260,8 @@ install_mmdevapi() {
 
 run_app() {
     local exe
-    exe=$(find_app) || { install_app "${1:-}"; exe=$(find_app); }
+    if find_app >/dev/null; then update_app; else install_app "${1:-}"; fi
+    exe=$(find_app)
     install_mmdevapi
     export WINEDLLOVERRIDES="mmdevapi=n,b${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
     start_capture_helper
@@ -211,10 +278,7 @@ case "${1:-}" in
     reset)
         read -rp "¿Borrar $WINEPREFIX? [s/N] " ans
         if [[ "$ans" == [sS] ]]; then rm -rf -- "$WINEPREFIX"; echo "Prefijo borrado."; fi ;;
-    cambiar-captura)
-        rm -f -- "$CACHE_DIR/capture.token"
-        touch "/dev/shm/tiktok-live-studio-capture-$(id -u).reset"
-        echo "Display capture va a preguntar qué pantalla o ventana compartir." ;;
+    cambiar-captura) change_capture ;;
     -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' ;;
     *) ensure_proton; run_app "${1:-}" ;;
 esac

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Cambiar captura de TikTok
+Comment=Elige qué pantalla, ventana o región muestra una Display capture
+Exec=tiktok-live-studio cambiar-captura
+Icon=tiktok-live-studio
+Terminal=false
+Categories=AudioVideo;Video;

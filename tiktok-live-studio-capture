@@ -6,10 +6,17 @@ captura al portal del escritorio (org.freedesktop.portal.ScreenCast), recibe
 los fotogramas por PipeWire y los deja en memoria compartida. El winex11.so
 parcheado los copia cuando una app lee la imagen del escritorio (BitBlt).
 
-La captura empieza cuando Wine crea <shm>.request (la primera vez que una app
-lee el escritorio) y se detiene si nadie lee durante IDLE_TIMEOUT segundos.
+Cada captura es una ranura con su propia elección guardada. Por ahora Wine solo
+pide la ranura 1: TikTok lee todos sus Display igual, así que no se distinguen.
+  <shm>.N          fotogramas
+  <shm>.N.request  lo crea Wine cuando esa ranura no tiene imagen
+  <shm>.N.reset    lo crea "tiktok-live-studio cambiar-captura"
+  <shm>.N.status   lo que se captura ("pantalla", "ventana", "sin elegir")
 
-Formato de <shm> (little endian):
+Una captura empieza cuando aparece .request y se detiene si nadie lee durante
+IDLE_TIMEOUT segundos.
+
+Formato de los fotogramas (little endian):
   0  u32 magic 'TLSC'      4  u32 versión (1)
   8  u32 seq: impar mientras se escribe un fotograma
   12 u32 ancho   16 u32 alto   20 u32 stride (bytes)   24 u32 formato (0 = BGRx)
@@ -18,6 +25,7 @@ Formato de <shm> (little endian):
   64 píxeles
 """
 
+import glob
 import mmap
 import os
 import random
@@ -34,15 +42,22 @@ MAGIC = 0x43534C54
 HEADER = 64
 MAX_W, MAX_H = 3840, 2160
 IDLE_TIMEOUT = 15
+STALL_TIMEOUT = 3
 
 SHM = os.environ.get("TTLS_CAPTURE_SHM", f"/dev/shm/tiktok-live-studio-capture-{os.getuid()}")
-TOKEN = os.path.join(
-    os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
-    "tiktok-live-studio", "capture.token")
+CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "tiktok-live-studio")
 
 PORTAL = "org.freedesktop.portal.Desktop"
 PORTAL_PATH = "/org/freedesktop/portal/desktop"
 SCREENCAST = "org.freedesktop.portal.ScreenCast"
+SOURCE_TYPES = {1: "pantalla", 2: "ventana"}
+
+
+def remove(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def log(*args):
@@ -75,14 +90,19 @@ class Shm:
 
 
 class Capture:
-    def __init__(self, shm, loop):
-        self.shm = shm
-        self.loop = loop
-        self.bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+    def __init__(self, name, bus):
+        self.name = name
+        self.path = f"{SHM}.{name}"
+        self.token = os.path.join(CACHE, f"capture.{name}.token")
+        self.shm = Shm(self.path)
+        self.bus = bus
         self.sender = self.bus.get_unique_name()[1:].replace(".", "_")
         self.session = None
         self.pipeline = None
         self.active = False
+        self.waiting = False    # el portal está preguntando o respondiendo
+        self.cancelled = False  # no volver a preguntar hasta cambiar-captura
+        self.started = 0.0
 
     # -- portal ----------------------------------------------------------
     def _request(self, method, args, callback):
@@ -110,7 +130,9 @@ class Capture:
         if self.active:
             return
         self.active = True
-        log("pidiendo captura al portal")
+        self.waiting = True
+        self.started = time.monotonic()
+        log(f"{self.name}: pidiendo captura al portal")
         self._request("CreateSession", [{
             "session_handle_token": GLib.Variant("s", f"ttls{random.randrange(1 << 30)}")}],
             self._on_session)
@@ -124,10 +146,10 @@ class Capture:
                 "cursor_mode": GLib.Variant("u", 2),     # cursor dentro de la imagen
                 "persist_mode": GLib.Variant("u", 2)}
         try:
-            with open(TOKEN) as f:
+            with open(self.token) as f:
                 opts["restore_token"] = GLib.Variant("s", f.read().strip())
         except OSError:
-            pass
+            self._notify()
         self._request("SelectSources", [self.session, opts], self._on_sources)
 
     def _on_sources(self, code, _results):
@@ -139,29 +161,51 @@ class Capture:
         if code != 0:
             return self._fail("Start", code)
         if "restore_token" in results:
-            os.makedirs(os.path.dirname(TOKEN), exist_ok=True)
-            with open(TOKEN, "w") as f:
+            os.makedirs(CACHE, exist_ok=True)
+            with open(self.token, "w") as f:
                 f.write(results["restore_token"])
-        node = results["streams"][0][0]
+        self.node, props = results["streams"][0]
+        self._set_status(SOURCE_TYPES.get(props.get("source_type"), "captura"))
+        self.waiting = False
+        self._open_stream()
+
+    def _open_stream(self):
         msg = Gio.DBusMessage.new_method_call(PORTAL, PORTAL_PATH, SCREENCAST, "OpenPipeWireRemote")
         msg.set_body(GLib.Variant("(oa{sv})", (self.session, {})))
         reply = self.bus.send_message_with_reply_sync(msg, Gio.DBusSendMessageFlags.NONE, -1, None)[0]
         fd = reply.get_unix_fd_list().get(reply.get_body().unpack()[0])
-        self._start_pipeline(fd, node)
+        self._start_pipeline(fd, self.node)
 
     def _fail(self, step, code):
-        log(f"{step}: el portal respondió {code} (cancelado o denegado)")
-        if code == 2 and os.path.exists(TOKEN):
-            os.remove(TOKEN)        # un permiso guardado que ya no vale
+        log(f"{self.name}: {step}: el portal respondió {code} (cancelado o denegado)")
+        if code == 2:
+            remove(self.token)      # un permiso guardado que ya no vale
         self.stop()
+        self.cancelled = code == 1  # si no, Wine lo pediría y el diálogo volvería a salir
+        self._set_status("sin elegir")
+
+    def _set_status(self, text):
+        with open(self.path + ".status", "w") as f:
+            f.write(text + "\n")
+
+    def _notify(self):
+        # El diálogo del portal no dice para cuál fuente se elige.
+        try:
+            self.bus.call_sync("org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+                               "org.freedesktop.Notifications", "Notify",
+                               GLib.Variant("(susssasa{sv}i)", ("TikTok LIVE Studio", 0, "tiktok-live-studio",
+                                            "Display capture", "Elige qué mostrar en Display capture",
+                                            [], {}, 5000)),
+                               None, Gio.DBusCallFlags.NONE, 1000, None)
+        except GLib.Error:
+            pass
 
     # -- PipeWire -> memoria compartida ------------------------------------
     def _start_pipeline(self, fd, node):
         # PipeWire entrega los monitores girados sin girar, con la rotación como
         # metadato; videoflip method=automatic la aplica.
-        # Ventanas de XWayland: xdph 1.4 no entrega fotogramas por memoria
-        # compartida, y por DMA-BUF glupload falla ("Failed to upload buffer");
-        # en esos casos sirven Screen (juego a pantalla completa) o Region.
+        # Cuando xdph 1.4 renegocia el flujo de una ventana puede quedarse en "Out
+        # of buffers" sin entregar más fotogramas; restart_stream() lo reconecta.
         self.pipeline = Gst.parse_launch(
             f"pipewiresrc fd={fd} path={node} always-copy=true do-timestamp=true ! "
             "videoconvert ! videoflip method=automatic ! video/x-raw,format=BGRx ! "
@@ -169,10 +213,21 @@ class Capture:
         self.pipeline.get_by_name("sink").connect("new-sample", self._on_sample)
         self.pipeline.get_bus().add_signal_watch()
         self.pipeline.get_bus().connect("message::error", self._on_error)
+        self.last_frame = time.monotonic()
         self.pipeline.set_state(Gst.State.PLAYING)
-        log(f"capturando el nodo {node} de PipeWire")
+        log(f"{self.name}: capturando el nodo {node} de PipeWire")
+
+    def stalled(self):
+        # Una pantalla quieta tampoco manda fotogramas; reconectar no le hace daño.
+        return self.pipeline and time.monotonic() - self.last_frame > STALL_TIMEOUT
+
+    def restart_stream(self):
+        log(f"{self.name}: sin fotogramas; se reconecta el flujo")
+        self.pipeline.set_state(Gst.State.NULL)
+        self._open_stream()
 
     def _on_sample(self, sink):
+        self.last_frame = time.monotonic()
         sample = sink.emit("pull-sample")
         caps = sample.get_caps().get_structure(0)
         width, height = caps.get_value("width"), caps.get_value("height")
@@ -202,48 +257,76 @@ class Capture:
                 pass
             self.session = None
         self.shm.clear()
-        try:
-            os.remove(SHM + ".request")
-        except OSError:
-            pass
+        remove(self.path + ".request")
+        remove(self.path + ".status")
         self.active = False
+        self.waiting = False
+
+    def tick(self, others_waiting):
+        # "cambiar-captura": se suelta la fuente actual y, en cuanto Wine vuelva a
+        # pedir la imagen, el portal pregunta de nuevo.
+        if os.path.exists(self.path + ".reset"):
+            remove(self.path + ".reset")
+            self.cancelled = False
+            if self.active:
+                log(f"{self.name}: cambio de fuente pedido")
+                self.stop()
+            return
+        if self.cancelled:
+            remove(self.path + ".request")
+        elif not self.active:
+            # Un diálogo a la vez: el portal no dice para cuál fuente pregunta.
+            if os.path.exists(self.path + ".request") and not others_waiting:
+                self.start()
+        elif self.stalled():
+            self.restart_stream()
+        elif not self.waiting and time.monotonic() - self.started > IDLE_TIMEOUT:
+            idle = time.clock_gettime(time.CLOCK_MONOTONIC) * 1000 - self.shm.last_read()
+            if idle > IDLE_TIMEOUT * 1000:
+                log(f"{self.name}: nadie lee la captura; se detiene")
+                self.stop()
 
 
 def main():
     Gst.init(None)
     loop = GLib.MainLoop()
-    shm = Shm(SHM)
-    capture = Capture(shm, loop)
-    started = 0.0
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+    captures = {}
+
+    # Del formato anterior, con una sola captura.
+    remove(SHM)
+    remove(os.path.join(CACHE, "capture.token"))
+
+    # De una sesión anterior: sin esto saldría el diálogo sin haber añadido la fuente.
+    for path in glob.glob(glob.escape(SHM) + ".*.request") + glob.glob(glob.escape(SHM) + ".*.reset") \
+            + glob.glob(glob.escape(SHM) + ".*.status"):
+        remove(path)
+    # Crear la captura vacía los fotogramas viejos: si no, Wine los daría por buenos
+    # y nunca pediría una captura nueva.
+    for path in glob.glob(glob.escape(SHM) + ".*"):
+        name = path[len(SHM) + 1:]
+        if "." not in name and name.isdigit():
+            captures[name] = Capture(name, bus)
 
     def tick():
-        nonlocal started
-        # "tiktok-live-studio cambiar-captura": se suelta la fuente actual y, en
-        # cuanto Wine vuelva a pedir la imagen, el portal pregunta de nuevo.
-        if os.path.exists(SHM + ".reset"):
-            os.remove(SHM + ".reset")
-            if capture.active:
-                log("cambio de fuente pedido")
-                capture.stop()
-        if not capture.active and os.path.exists(SHM + ".request"):
-            started = time.monotonic()
-            capture.start()
-        elif capture.active and time.monotonic() - started > IDLE_TIMEOUT:
-            idle = time.clock_gettime(time.CLOCK_MONOTONIC) * 1000 - shm.last_read()
-            if idle > IDLE_TIMEOUT * 1000:
-                log("nadie lee la captura; se detiene")
-                capture.stop()
+        for path in glob.glob(glob.escape(SHM) + ".*.request"):
+            name = path[len(SHM) + 1:-len(".request")]
+            if name not in captures:
+                captures[name] = Capture(name, bus)
+        waiting = any(c.waiting for c in captures.values())
+        for capture in captures.values():
+            capture.tick(waiting)
+            waiting = waiting or capture.waiting
         return True
 
-    if "--now" in sys.argv:
-        open(SHM + ".request", "a").close()
     GLib.timeout_add(500, tick)
     try:
         loop.run()
     except KeyboardInterrupt:
         pass
     finally:
-        capture.stop()
+        for capture in captures.values():
+            capture.stop()
 
 
 if __name__ == "__main__":

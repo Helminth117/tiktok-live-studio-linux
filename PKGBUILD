@@ -1,6 +1,6 @@
 # Maintainer: Joseph <joseph62937@gmail.com>
 pkgname=tiktok-live-studio-wine
-pkgver=1.2.1
+pkgver=1.4.0
 pkgrel=1
 pkgdesc="TikTok LIVE Studio (Windows) en Linux mediante umu-launcher/Proton"
 arch=('x86_64')
@@ -20,24 +20,27 @@ options=('!strip' '!debug')
 source=('tiktok-live-studio'
         'tiktok-live-studio-capture'
         'tiktok-live-studio.desktop'
+        'tiktok-live-studio-cambiar-captura.desktop'
         'tiktok-live-studio.svg'
         'mmdevapi.dll'
         'mmdevapi-device-topology.patch'
         'winex11.so'
         'winex11-screen-capture.patch')
-sha256sums=('72e57e3afd0fde9a4e284e41800c6c13ab573a0d6df887fa2c3d11d39877911f'
-            '31d605bca9d6250c732b5390c61a651ab22c43a1f1065b4b89b4c03d3177bd6e'
+sha256sums=('43be92dc796fe9ed432c998f608b9cf829a337cbb4fff48f3c0022d93586037f'
+            'dac5ae7cd82cf3b2899caf6159da339032549613ca4ff982d6826e9168abe9b9'
             '456ef04418a8ce085bfbeb5f0ac3ba06e71382e6bdebccb8653f01a43f3fbf48'
+            '8695816749bb38a351b6bd7c44d5fd1d2f6c4c6e80038c9c8e1360ef9c92ac5f'
             'a8ec3a4b88bf16dd1af1c8b97c51ec9143d1005269276935adee67ec79626417'
             '668fb71bc5bc7599301f6bde780188aa0c4b6f2e1f74ce15fc183d1650fb2e15'
             '5c17760dfa02a772b1c4963cbe412345e1ff726390f63012d161eb3f3be09144'
-            'b6e5dbf3cddfbecf8a6cdad96e485940cdb77a8c58b8313c1d6a079403147988'
-            'e9256146b89365ba142d63b3b8e70a7001287625c18e16c94fd03c26bda371ee')
+            'c66977cdd1b39ff64a90d9771409726c94573732894ddd6cb4763faf165424e2'
+            '55f83f9ba2bb1fb5728418cb09dcf33ef9787c413ee2704e452e041cf6f32351')
 
 package() {
   install -Dm755 tiktok-live-studio "$pkgdir/usr/bin/tiktok-live-studio"
   install -Dm755 tiktok-live-studio-capture "$pkgdir/usr/lib/tiktok-live-studio/tiktok-live-studio-capture"
   install -Dm644 tiktok-live-studio.desktop "$pkgdir/usr/share/applications/tiktok-live-studio.desktop"
+  install -Dm644 tiktok-live-studio-cambiar-captura.desktop "$pkgdir/usr/share/applications/tiktok-live-studio-cambiar-captura.desktop"
   install -Dm644 tiktok-live-studio.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/tiktok-live-studio.svg"
   install -Dm644 mmdevapi.dll "$pkgdir/usr/share/tiktok-live-studio/mmdevapi.dll"
   install -Dm644 mmdevapi-device-topology.patch "$pkgdir/usr/share/tiktok-live-studio/mmdevapi-device-topology.patch"

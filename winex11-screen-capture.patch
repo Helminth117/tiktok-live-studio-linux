@@ -12,7 +12,7 @@
  
  #include <X11/Xlib.h>
  #include <X11/Xresource.h>
-@@ -1309,6 +1314,122 @@
+@@ -1309,6 +1314,145 @@
      return ERROR_BAD_FORMAT;
  }
  
@@ -36,28 +36,35 @@
 +#define CAPTURE_MAGIC  0x43534c54
 +#define CAPTURE_HEADER 64
 +
++static BOOL capture_path( char *path, size_t len, const char *suffix )
++{
++    const char *base = getenv( "WINE_SCREEN_CAPTURE_SHM" );
++    return base && snprintf( path, len, "%s.1%s", base, suffix ) < len;
++}
++
 +static struct capture_header *capture_map( size_t *size )
 +{
 +    static struct capture_header *header;
 +    static size_t header_size;
 +    static time_t last_try;
-+    const char *path = getenv( "WINE_SCREEN_CAPTURE_SHM" );
++    char path[1024];
 +    struct stat st;
 +    void *ptr;
 +    int fd;
 +
-+    if (header || !path) goto done;
++    if (header) goto done;
 +    if (time( NULL ) == last_try) return NULL;
 +    last_try = time( NULL );
 +
++    if (!capture_path( path, sizeof(path), "" )) return NULL;
 +    if ((fd = open( path, O_RDWR )) == -1) return NULL;
 +    if (!fstat( fd, &st ) && st.st_size > CAPTURE_HEADER &&
 +        (ptr = mmap( NULL, st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 )) != MAP_FAILED)
 +    {
 +        if (((struct capture_header *)ptr)->magic == CAPTURE_MAGIC)
 +        {
-+            header = ptr;
 +            header_size = st.st_size;
++            header = ptr;
 +        }
 +        else munmap( ptr, st.st_size );
 +    }
@@ -69,40 +76,47 @@
 +
 +static void capture_request(void)
 +{
-+    const char *path = getenv( "WINE_SCREEN_CAPTURE_SHM" );
 +    char request[1024];
 +    int fd;
 +
-+    if (snprintf( request, sizeof(request), "%s.request", path ) >= sizeof(request)) return;
++    if (!capture_path( request, sizeof(request), ".request" )) return;
 +    if ((fd = open( request, O_WRONLY | O_CREAT, 0600 )) != -1) close( fd );
 +}
 +
-+/* returns the last captured frame scaled to width x height, or NULL */
++/* returns the last captured frame, fitted into width x height keeping its
++ * proportions, or NULL */
 +static XImage *get_captured_screen( UINT width, UINT height )
 +{
++    static const struct timespec wait = { 0, 500000 };
 +    struct capture_header *header;
 +    struct timespec now;
-+    UINT seq, src_w, src_h, stride, x, y, tries;
++    UINT seq, src_w, src_h, stride, x, y, tries, waits, fit_w, fit_h, off_x, off_y;
 +    const BYTE *frame;
 +    XImage *image;
 +    size_t size;
 +    UINT *dst;
 +
++    if (!getenv( "WINE_SCREEN_CAPTURE_SHM" )) return NULL;
 +    if (!(header = capture_map( &size )))
 +    {
-+        if (getenv( "WINE_SCREEN_CAPTURE_SHM" )) capture_request();
++        capture_request();
 +        return NULL;
 +    }
 +    clock_gettime( CLOCK_MONOTONIC, &now );
 +    header->last_read = (UINT64)now.tv_sec * 1000 + now.tv_nsec / 1000000;
 +
-+    if (!(dst = malloc( (size_t)width * height * 4 ))) return NULL;
++    if (!(dst = calloc( (size_t)width * height, 4 ))) return NULL;
 +    frame = (const BYTE *)header + CAPTURE_HEADER;
 +
 +    for (tries = 0; tries < 3; tries++)
 +    {
-+        seq = __atomic_load_n( &header->seq, __ATOMIC_ACQUIRE );
-+        if (seq & 1) continue;
++        /* a write takes a few ms; don't give up on the frame in the meantime */
++        for (waits = 0; waits < 10; waits++)
++        {
++            seq = __atomic_load_n( &header->seq, __ATOMIC_ACQUIRE );
++            if (!(seq & 1)) break;
++            nanosleep( &wait, NULL );
++        }
 +        src_w = header->width;
 +        src_h = header->height;
 +        stride = header->stride;
@@ -113,18 +127,27 @@
 +            free( dst );
 +            return NULL;
 +        }
-+        for (y = 0; y < height; y++)
++        if ((UINT64)src_w * height > (UINT64)src_h * width)
 +        {
-+            const UINT *row = (const UINT *)(frame + (size_t)(y * src_h / height) * stride);
-+            for (x = 0; x < width; x++) dst[(size_t)y * width + x] = row[x * src_w / width];
++            fit_w = width;
++            fit_h = max( (UINT64)src_h * width / src_w, 1 );
++        }
++        else
++        {
++            fit_w = max( (UINT64)src_w * height / src_h, 1 );
++            fit_h = height;
++        }
++        off_x = (width - fit_w) / 2;
++        off_y = (height - fit_h) / 2;
++        for (y = 0; y < fit_h; y++)
++        {
++            const UINT *row = (const UINT *)(frame + (size_t)(y * src_h / fit_h) * stride);
++            UINT *out = dst + (size_t)(y + off_y) * width + off_x;
++            for (x = 0; x < fit_w; x++) out[x] = row[x * src_w / fit_w];
 +        }
 +        if (__atomic_load_n( &header->seq, __ATOMIC_ACQUIRE ) == seq) break;
 +    }
-+    if (tries == 3)
-+    {
-+        free( dst );
-+        return NULL;
-+    }
++    /* a frame torn by the next write is still better than the black root window */
 +
 +    if (!(image = XCreateImage( gdi_display, default_visual.visual, default_visual.depth, ZPixmap, 0,
 +                                (char *)dst, width, height, 32, width * 4 )))
@@ -135,7 +158,7 @@
  /***********************************************************************
   *           X11DRV_GetImage
   */
-@@ -1367,6 +1488,12 @@
+@@ -1367,6 +1511,12 @@
      src->y -= y;
      OffsetRect( &src->visrect, -x, -y );
  
@@ -148,7 +171,7 @@
      X11DRV_expect_error( gdi_display, XGetImage_handler, NULL );
      image = XGetImage( gdi_display, physdev->drawable,
                         physdev->dc_rect.left + x, physdev->dc_rect.top + y,
-@@ -1384,6 +1511,7 @@
+@@ -1384,6 +1534,7 @@
          XFreePixmap( gdi_display, pixmap );
          XFreeGC( gdi_display, gc );
      }
