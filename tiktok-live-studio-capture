@@ -112,20 +112,23 @@ class Shm:
         self.capacity = size - HEADER
         self.seq = 0
         struct.pack_into("<IIIIIIII", self.map, 0, MAGIC, 1, 0, 0, 0, 0, 0, 0)
+        # Palabra por palabra: struct.pack_into pone en cero la zona antes de escribirla,
+        # y Wine tomaría un ancho de 0 como que no hay imagen (un cuadro negro).
+        self.words = memoryview(self.map).cast("I")
 
     def write(self, width, height, stride, data):
         self.seq += 1
-        struct.pack_into("<I", self.map, 8, self.seq)          # impar: escribiendo
+        self.words[2] = self.seq          # impar: escribiendo
         self.map[HEADER:HEADER + len(data)] = data
-        struct.pack_into("<IIII", self.map, 12, width, height, stride, 0)
+        self.words[3], self.words[4], self.words[5] = width, height, stride
         self.seq += 1
-        struct.pack_into("<I", self.map, 8, self.seq)
+        self.words[2] = self.seq
 
     def last_read(self):
         return struct.unpack_from("<Q", self.map, 32)[0]
 
     def clear(self):
-        struct.pack_into("<IIII", self.map, 12, 0, 0, 0, 0)
+        self.words[3], self.words[4], self.words[5] = 0, 0, 0
 
 
 class LinkFrames:
