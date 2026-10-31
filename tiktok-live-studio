@@ -379,6 +379,30 @@ install_mmdevapi() {
     cp "$MMDEVAPI_DLL" "$dst"
 }
 
+# Con monitores que no empiezan en x=0, Wine coloca la ventana donde no hay pantalla, y
+# la devuelve ahí si se mueve mientras flota. Acoplada, la posición la decide Hyprland.
+offscreen_window() {
+    jq -nr --argjson monitors "$(hyprctl monitors -j)" --argjson clients "$(hyprctl clients -j)" '
+        [$clients[] | select(.class == "steam_app_default" and .title == "TikTok LIVE Studio" and .floating) |
+            . as $w | select(all($monitors[];
+                $w.at[0] + $w.size[0] <= .x or $w.at[0] >= .x + .width or
+                $w.at[1] + $w.size[1] <= .y or $w.at[1] >= .y + .height))][0].address // empty'
+}
+
+keep_window_visible() {
+    local address
+
+    [[ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]] && command -v hyprctl >/dev/null || return 0
+    while kill -0 $$ 2>/dev/null; do
+        sleep 2
+        address=$(offscreen_window 2>/dev/null) || continue
+        [[ -n "$address" ]] || continue
+        # Hyprland con configuración en Lua usa la primera forma; las versiones anteriores, la segunda.
+        hyprctl dispatch "hl.dsp.window.float({ action = \"toggle\", window = \"address:$address\" })" 2>/dev/null | grep -qx ok ||
+            hyprctl dispatch togglefloating "address:$address" >/dev/null 2>&1 || true
+    done
+}
+
 run_app() {
     local exe
     if find_app >/dev/null; then update_app; else install_app "${1:-}"; fi
@@ -386,6 +410,7 @@ run_app() {
     install_mmdevapi
     export WINEDLLOVERRIDES="mmdevapi=n,b${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
     start_capture_helper
+    keep_window_visible &
     cd "$(dirname "$exe")"
     [[ -n "${CAPTURE_PID:-}" ]] || exec umu-run "$exe"
     # Puede haber salido ya, si otra ventana de la app tiene el ayudante.
