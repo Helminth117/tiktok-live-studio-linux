@@ -89,7 +89,7 @@ download() {
 }
 
 ensure_proton() {
-    local tmp sum
+    local tmp sum extract
 
     if [[ -n "${PROTONPATH:-}" ]]; then
         export PROTONPATH
@@ -107,10 +107,16 @@ ensure_proton() {
         fi
         sum=$(curl -fsSL "$PROTON_URL.sha512sum" | cut -d' ' -f1) || die "No se pudo descargar el SHA-512 de $PROTON_RELEASE."
         [[ "$(sha512sum "$tmp/proton.tar.gz" | cut -d' ' -f1)" == "$sum" ]] || die "El SHA-512 de $PROTON_RELEASE no coincide."
-        mkdir -p "$(dirname "$PROTON_DIR")"
-        tar -xzf "$tmp/proton.tar.gz" -C "$(dirname "$PROTON_DIR")"
+        # Se extrae aparte: una extracción cortada no debe parecer una instalación completa.
+        extract="$PROTON_DIR.tmp"
+        rm -rf -- "${extract:?}"
+        mkdir -p "$extract"
+        tar -xzf "$tmp/proton.tar.gz" -C "$extract"
         rm -rf "$tmp"
-        [[ -f "$PROTON_DIR/toolmanifest.vdf" ]] || die "$PROTON_RELEASE no quedó en $PROTON_DIR."
+        [[ -f "$extract/${PROTON_DIR##*/}/toolmanifest.vdf" ]] || die "$PROTON_RELEASE no quedó en $extract."
+        rm -rf -- "${PROTON_DIR:?}"
+        mv "$extract/${PROTON_DIR##*/}" "$PROTON_DIR"
+        rm -rf -- "${extract:?}"
     fi
     export PROTONPATH="$PROTON_DIR"
     ensure_capture_proton
@@ -123,6 +129,7 @@ ensure_capture_proton() {
 
     [[ -f "$WINEX11_SO" ]] || { echo "aviso: no existe $WINEX11_SO; no habrá captura de pantalla" >&2; return 0; }
     if ! cmp -s "$WINEX11_SO" "$CAPTURE_PROTON_DIR/$so"; then
+        mkdir -p "$DATA_DIR"
         rm -rf -- "${tmp:?}"
         cp -al "$PROTON_DIR" "$tmp" 2>/dev/null || cp -a --reflink=auto "$PROTON_DIR" "$tmp"
         rm -f -- "${tmp:?}/$so"
@@ -215,11 +222,13 @@ update_app() {
 
     echo "Actualizando TikTok LIVE Studio de $current a $latest ..." >&2
     installer=$(fetch_installer) || { echo "aviso: no se pudo descargar $latest; se abre $current" >&2; return 0; }
+    # En subshell: un error dentro de install_app no debe impedir abrir lo instalado.
     if [[ -t 2 ]] || ! command -v zenity >/dev/null; then
-        install_app "$installer"
+        ( install_app "$installer" ) || echo "aviso: no se pudo instalar $latest; se abre $current" >&2
     else
-        install_app "$installer" 2>/dev/null | zenity --progress --pulsate --auto-close --no-cancel \
-            --title="TikTok LIVE Studio" --text="Instalando la versión $latest ..." 2>/dev/null
+        ( install_app "$installer" 2>/dev/null ) | zenity --progress --pulsate --auto-close --no-cancel \
+            --title="TikTok LIVE Studio" --text="Instalando la versión $latest ..." 2>/dev/null ||
+            echo "aviso: no se pudo instalar $latest; se abre $current" >&2
     fi
 }
 
@@ -265,8 +274,12 @@ change_capture() {
 
 # Las capturas extra son páginas locales (ver tiktok-live-studio-capture).
 new_capture() {
-    local base="/dev/shm/tiktok-live-studio-capture-$(id -u)" n=2 url i message
+    local base="/dev/shm/tiktok-live-studio-capture-$(id -u)" n=2 url i message dns_note=""
 
+    # Algunos routers filtran respuestas de DNS que apuntan a 127.0.0.1.
+    if [[ "$(getent ahostsv4 lvh.me 2>/dev/null | awk 'NR == 1 { print $1 }')" != 127.0.0.1 ]]; then
+        dns_note="\n\nAviso: tu DNS no resuelve lvh.me, así que la fuente Link puede quedarse en blanco. Si pasa, ejecuta en una terminal:\n\necho '127.0.0.1 lvh.me' | sudo tee -a /etc/hosts"
+    fi
     pgrep -f '/tiktok-live-studio-capture$' >/dev/null || die "Abre TikTok LIVE Studio primero."
     while [[ -e "$CACHE_DIR/capture.$n.url" ]]; do n=$((n + 1)); done
     touch "$base.$n.request"
@@ -277,7 +290,7 @@ new_capture() {
     [[ -s "$base.$n.url" ]] || die "El ayudante de captura no respondió."
     url=$(<"$base.$n.url")
     command -v wl-copy >/dev/null && printf '%s' "$url" | wl-copy
-    message="Captura $n: elige qué mostrar en el diálogo.\n\nEn TikTok: Add source → Link → pega esta dirección (Ctrl+V)$(command -v wl-copy >/dev/null && echo ', ya está copiada'):\n\n$url\n\nActiva Custom resolution con 1920×1080 para que se vea nítida."
+    message="Captura $n: elige qué mostrar en el diálogo.\n\nEn TikTok: Add source → Link → pega esta dirección (Ctrl+V)$(command -v wl-copy >/dev/null && echo ', ya está copiada'):\n\n$url\n\nActiva Custom resolution con 1920×1080 para que se vea nítida.$dns_note"
     if [[ -t 2 ]] || ! command -v zenity >/dev/null; then
         printf '%b\n' "$message" >&2
     else
@@ -375,7 +388,8 @@ run_app() {
     start_capture_helper
     cd "$(dirname "$exe")"
     [[ -n "${CAPTURE_PID:-}" ]] || exec umu-run "$exe"
-    trap 'kill "$CAPTURE_PID" 2>/dev/null' EXIT
+    # Puede haber salido ya, si otra ventana de la app tiene el ayudante.
+    trap 'kill "$CAPTURE_PID" 2>/dev/null || true' EXIT
     umu-run "$exe"
 }
 

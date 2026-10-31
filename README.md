@@ -182,6 +182,9 @@ Needs `clang`, `lld`, `bison`, `flex`, `autoconf` and the X11 headers.
   was added on. After connecting or removing a monitor, add a new *Display capture*.
 - **Generic icon in the menu (Omarchy)**: the shell indexes icons when it
   starts; run `omarchy-restart-shell` after installing.
+- **Link source stays blank**: some routers filter DNS answers that point to
+  `127.0.0.1`. Check `getent hosts lvh.me`; if it prints nothing, run
+  `echo '127.0.0.1 lvh.me' | sudo tee -a /etc/hosts`.
 - **Logs**: `~/.local/share/tiktok-live-studio/prefix/drive_c/users/steamuser/AppData/Roaming/TikTok LIVE Studio/logs/`.
 - **Wine traces**: `WINEDEBUG=+mmdevapi tiktok-live-studio`.
 
@@ -281,6 +284,9 @@ PipeWire.
   se añadió. Si conectas o quitas un monitor, añade una *Display capture* nueva.
 - **Icono genérico en el menú (Omarchy)**: la shell indexa los iconos al
   arrancar; ejecuta `omarchy-restart-shell` después de instalar.
+- **La fuente Link se queda en blanco**: algunos routers filtran las respuestas de
+  DNS que apuntan a `127.0.0.1`. Comprueba `getent hosts lvh.me`; si no imprime nada,
+  ejecuta `echo '127.0.0.1 lvh.me' | sudo tee -a /etc/hosts`.
 - **No aparece el diálogo para compartir pantalla**: revisa que tengas un portal
   (`xdg-desktop-portal-hyprland`, `-gnome`, `-kde` o `-wlr`) y, en Hyprland, que
   `~/.config/hypr/xdph.conf` no apunte a un `custom_picker_binary` que ya no
