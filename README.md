@@ -148,7 +148,9 @@ tiktok-live-studio activar-deteccion
 ```
 
 It sets `custom_picker_binary` in `~/.config/hypr/xdph.conf` (keeping a backup) and restarts
-the portal. While the app is closed the capture keeps its last frame and shows no dialog.
+the portal. A picker you already had, like Omarchy's, keeps opening whenever a dialog is
+needed. Run `tiktok-live-studio desactivar-deteccion` before uninstalling to restore it.
+While the app is closed the capture keeps its last frame and shows no dialog.
 Other apps that share your screen still get the normal dialog. Without this command, the
 share dialog opens by itself about 15 seconds after the app closes.
 
@@ -249,8 +251,10 @@ Cada fuente conserva su dirección y su elección, y vuelve sola al reiniciar Ti
 app sigue abierta. Una ventana se sigue capturando aunque esté en otro escritorio. Para que
 cada captura encuentre sola su app al cerrarla y reabrirla, en Hyprland ejecuta una vez
 `tiktok-live-studio activar-deteccion` (cambia `custom_picker_binary` en
-`~/.config/hypr/xdph.conf`, con copia de seguridad, y reinicia el portal). Sin eso, a los 15
-segundos más o menos sale el diálogo para elegirla otra vez.
+`~/.config/hypr/xdph.conf`, con copia de seguridad, y reinicia el portal). Si ya tenías otro
+selector, como el de Omarchy, se sigue abriendo cuando haga falta preguntar;
+`tiktok-live-studio desactivar-deteccion` lo restaura, y conviene usarlo antes de desinstalar.
+Sin eso, a los 15 segundos más o menos sale el diálogo para elegirla otra vez.
 
 Con `xdg-desktop-portal-hyprland` 1.4, cerrar una ventana capturada además hace caer el
 portal y corta un momento todas las capturas, que se recuperan solas; en un LIVE, quita la

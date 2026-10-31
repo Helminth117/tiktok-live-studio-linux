@@ -4,17 +4,20 @@
 El portal no vuelve a encontrar una ventana cuando su app se cierra y se reabre. Si
 tiktok-live-studio-capture está pidiendo una ranura (<shm>.picking) cuya app recuerda,
 esta se elige sola sin mostrar nada. En cualquier otro caso, incluidas las demás apps
-del escritorio, se abre el selector normal de Hyprland, y lo elegido para esa ranura se
-recuerda.
+del escritorio, se abre el selector que había antes de activar la detección (el normal de
+Hyprland si no había otro), y lo elegido para esa ranura se recuerda.
 """
 
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 
-SHM = f"/dev/shm/tiktok-live-studio-capture-{os.getuid()}"
+SHM = os.environ.get("TTLS_CAPTURE_SHM", f"/dev/shm/tiktok-live-studio-capture-{os.getuid()}")
 CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "tiktok-live-studio")
+CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "tiktok-live-studio")
 
 
 def read(path):
@@ -37,7 +40,18 @@ def signed(handle):
     return handle - (1 << 32) if handle >= 1 << 31 else handle
 
 
-slot = read(SHM + ".picking")
+def picking_slot():
+    # Ranura y PID del ayudante: si murió eligiendo, el archivo ya no significa nada.
+    fields = read(SHM + ".picking").split()
+    return fields[0] if len(fields) == 2 and os.path.exists(f"/proc/{fields[1]}") else ""
+
+
+def fallback_picker():
+    command = shlex.split(read(os.path.join(CONFIG, "picker-fallback")))
+    return command if command and shutil.which(command[0]) else ["hyprland-share-picker"]
+
+
+slot = picking_slot()
 class_file = os.path.join(CACHE, f"capture.{slot}.class")
 known = windows()
 
@@ -49,7 +63,7 @@ if slot and read(class_file):
     # La app recordada está cerrada: el ayudante la espera, no hay nada que preguntar.
     sys.exit(1)
 
-picker = subprocess.run(["hyprland-share-picker", *sys.argv[1:]], stdout=subprocess.PIPE, text=True)
+picker = subprocess.run([*fallback_picker(), *sys.argv[1:]], stdout=subprocess.PIPE, text=True)
 sys.stdout.write(picker.stdout)
 chosen = re.search(r"window:(-?\d+)", picker.stdout)
 if slot and chosen and int(chosen[1]) & 0xffffffff in known:

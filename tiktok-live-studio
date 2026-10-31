@@ -14,6 +14,8 @@
 #   tiktok-live-studio activar-deteccion
 #                                      en Hyprland, hace que una captura encuentre
 #                                      sola su app cuando se cierra y se reabre
+#   tiktok-live-studio desactivar-deteccion
+#                                      deja el selector de pantalla que había antes
 #
 # Variables: TTLS_PREFIX (ruta del prefijo), PROTONPATH (por defecto GE-Proton11-11,
 #            que se descarga si falta; con otro valor no hay captura de pantalla),
@@ -39,6 +41,9 @@ MMDEVAPI_DLL="${TTLS_MMDEVAPI:-/usr/share/tiktok-live-studio/mmdevapi.dll}"
 WINEX11_SO="${TTLS_WINEX11:-/usr/share/tiktok-live-studio/winex11.so}"
 CAPTURE_HELPER="${TTLS_CAPTURE_HELPER:-/usr/lib/tiktok-live-studio/tiktok-live-studio-capture}"
 PICKER="${TTLS_PICKER:-/usr/lib/tiktok-live-studio/tiktok-live-studio-picker}"
+XDPH_CONF="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/xdph.conf"
+# El selector que había antes: tiktok-live-studio-picker lo abre cuando hay que preguntar.
+PICKER_FALLBACK="${XDG_CONFIG_HOME:-$HOME/.config}/tiktok-live-studio/picker-fallback"
 CAPTURE_PROTON_DIR="$DATA_DIR/proton"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/tiktok-live-studio"
 DOWNLOAD_URL="https://www.tiktok.com/studio/download"
@@ -281,22 +286,74 @@ new_capture() {
 }
 
 # El selector del portal se configura en un archivo del usuario.
-enable_detection() {
-    local conf="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/xdph.conf"
+current_picker() {
+    sed -nE 's/^[[:space:]]*custom_picker_binary[[:space:]]*=[[:space:]]*//p' "$XDPH_CONF" 2>/dev/null |
+        sed -E 's/[[:space:]]*(#.*)?$//' | head -n1 || true
+}
 
-    if grep -qE '^[[:space:]]*custom_picker_binary' "$conf" 2>/dev/null; then
-        grep -q "custom_picker_binary = $PICKER" "$conf" && { echo "Ya está activada." >&2; return 0; }
-        die "$conf ya usa otro selector (custom_picker_binary); cámbialo a mano por $PICKER"
-    fi
-    mkdir -p "$(dirname "$conf")"
-    [[ -f "$conf" ]] && cp "$conf" "$conf.bak.$(date +%s)"
-    if grep -qE '^[[:space:]]*screencopy[[:space:]]*\{' "$conf" 2>/dev/null; then
-        sed -i -E "0,/^[[:space:]]*screencopy[[:space:]]*\{/s||&\n    custom_picker_binary = $PICKER|" "$conf"
+# Reemplaza xdph.conf con lo que llega por la entrada, con copia y sin escribir en sitio.
+replace_xdph_conf() {
+    local file tmp backup="$XDPH_CONF.bak-$(date +%Y%m%d)"
+
+    file=$(readlink -f -- "$XDPH_CONF")
+    tmp=$(mktemp "$file.XXXXXX")
+    cat >"$tmp"
+    if [[ -f "$file" ]]; then
+        [[ -e "$backup" ]] || cp -- "$file" "$backup"
+        chmod --reference="$file" "$tmp"
     else
-        printf 'screencopy {\n    custom_picker_binary = %s\n}\n' "$PICKER" >>"$conf"
+        chmod 644 "$tmp"
+    fi
+    mv -- "$tmp" "$file"
+}
+
+# Escapa un texto para usarlo como reemplazo en "s|...|...|" de sed.
+sed_escape() {
+    printf '%s' "$1" | sed 's/[&|\\]/\\&/g'
+}
+
+set_picker_line() {
+    sed -E "s|^([[:space:]]*custom_picker_binary[[:space:]]*=[[:space:]]*).*|\1$(sed_escape "$1")|" "$XDPH_CONF"
+}
+
+enable_detection() {
+    local current
+
+    current=$(current_picker)
+    [[ "$current" == "$PICKER" ]] && { echo "Ya está activada." >&2; return 0; }
+    mkdir -p "$(dirname "$XDPH_CONF")" "$(dirname "$PICKER_FALLBACK")"
+    if [[ -n "$current" ]]; then
+        printf '%s\n' "$current" >"$PICKER_FALLBACK"
+        set_picker_line "$PICKER" | replace_xdph_conf
+    else
+        rm -f -- "$PICKER_FALLBACK"
+        if grep -qE '^[[:space:]]*screencopy[[:space:]]*\{' "$XDPH_CONF" 2>/dev/null; then
+            sed -E "0,/^[[:space:]]*screencopy[[:space:]]*\{/s||&\n    custom_picker_binary = $(sed_escape "$PICKER")|" "$XDPH_CONF" | replace_xdph_conf
+        else
+            { cat -- "$XDPH_CONF" 2>/dev/null || true
+              printf 'screencopy {\n    custom_picker_binary = %s\n}\n' "$PICKER"; } | replace_xdph_conf
+        fi
     fi
     systemctl --user restart xdg-desktop-portal-hyprland
     echo "Listo: las capturas de ventana encontrarán su app al reabrirla." >&2
+}
+
+disable_detection() {
+    local fallback=""
+
+    [[ "$(current_picker)" == "$PICKER" ]] || { echo "No está activada." >&2; return 0; }
+    [[ -f "$PICKER_FALLBACK" ]] && fallback=$(<"$PICKER_FALLBACK")
+    if [[ -n "$fallback" ]]; then
+        set_picker_line "$fallback" | replace_xdph_conf
+    else
+        # Sin la línea, un bloque que quede vacío también era nuestro.
+        sed -E '/^[[:space:]]*custom_picker_binary[[:space:]]*=/d' "$XDPH_CONF" |
+            sed -E '/^screencopy \{$/{N;/\n\}$/d}' | replace_xdph_conf
+        [[ -s "$XDPH_CONF" ]] || rm -f -- "$XDPH_CONF"
+    fi
+    rm -f -- "$PICKER_FALLBACK"
+    systemctl --user restart xdg-desktop-portal-hyprland
+    echo "Listo: el portal vuelve a usar el selector de antes." >&2
 }
 
 install_mmdevapi() {
@@ -332,6 +389,7 @@ case "${1:-}" in
     cambiar-captura) change_capture ;;
     nueva-captura) new_capture ;;
     activar-deteccion) enable_detection ;;
-    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//' ;;
+    desactivar-deteccion) disable_detection ;;
+    -h|--help) sed -n '2,/^[^#]/{/^#/s/^# \{0,1\}//p}' "$0" ;;
     *) ensure_proton; run_app "${1:-}" ;;
 esac

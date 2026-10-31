@@ -15,8 +15,9 @@ Link de TikTok, que puede tener varias a la vez:
   <shm>.N.reset    lo crea "tiktok-live-studio cambiar-captura"
   <shm>.N.status   lo que se captura ("pantalla", "ventana", "sin elegir")
   <shm>.N.url      dirección para la fuente Link (ranuras 2 en adelante)
-  <shm>.picking    ranura que está eligiendo, para tiktok-live-studio-picker, que
-                   recuerda la app en capture.N.class y la elige sola al reabrirla
+  <shm>.picking    ranura que está eligiendo y PID de este proceso, para
+                   tiktok-live-studio-picker, que recuerda la app en capture.N.class y
+                   la elige sola al reabrirla
 
 Una captura empieza cuando aparece .request y se detiene si nadie lee durante
 IDLE_TIMEOUT segundos.
@@ -217,7 +218,7 @@ class Capture:
             remove(self.token)
         self.waiting_app = False
         with open(SHM + ".picking", "w") as f:
-            f.write(self.name + "\n")
+            f.write(f"{self.name}\n{os.getpid()}\n")
         self.active = True
         self.waiting = True
         self.started = time.monotonic()
