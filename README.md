@@ -31,10 +31,12 @@ Wine fix that makes **microphones and speakers work** inside the app.
 | TikTok's own *Window capture* / *Game capture* | Do not work: they inject into Windows processes and only see Windows apps |
 | Sharing a single **window** in the portal | Works with Minecraft Java (XWayland): about 37 fps, freezing up to 3 s when it changes size. Native Wayland windows: not tested |
 | Several different captures at once | Works: one *Display capture* plus any number of *Link* sources, see [below](#several-captures-at-once) |
+| Local recording | Works: 30 fps with no repeated frames, even while the preview stutters |
+| Studio preview | Stutters under Wine (about 20 changes per second from a steady 30), without affecting recordings |
 | Going LIVE | Not verified yet |
 
-Tested on Arch Linux (Omarchy, Hyprland/Wayland, PipeWire, AMD Radeon Vega),
-TikTok LIVE Studio 1.39.0, GE-Proton11-11.
+Tested on Arch Linux (Omarchy, Hyprland/Wayland, PipeWire) with AMD Radeon Vega and
+NVIDIA RTX 3070, TikTok LIVE Studio 1.38.0 and 1.39.0, GE-Proton11-11.
 
 ## Install (Arch Linux)
 
@@ -182,6 +184,9 @@ Needs `clang`, `lld`, `bison`, `flex`, `autoconf` and the X11 headers.
   was added on. After connecting or removing a monitor, add a new *Display capture*.
 - **Generic icon in the menu (Omarchy)**: the shell indexes icons when it
   starts; run `omarchy-restart-shell` after installing.
+- **Desktop menus stop drawing on NVIDIA**: `journalctl -k | grep NVRM` shows
+  `NV_ERR_NO_MEMORY`. It happened once with a modded game using most of the video
+  memory. Close TikTok to recover, without restarting anything.
 - **Link source stays blank**: some routers filter DNS answers that point to
   `127.0.0.1`. Check `getent hosts lvh.me`; if it prints nothing, run
   `echo '127.0.0.1 lvh.me' | sudo tee -a /etc/hosts`.
@@ -284,6 +289,11 @@ PipeWire.
   se añadió. Si conectas o quitas un monitor, añade una *Display capture* nueva.
 - **Icono genérico en el menú (Omarchy)**: la shell indexa los iconos al
   arrancar; ejecuta `omarchy-restart-shell` después de instalar.
+- **La vista previa da tirones**: es solo la vista previa bajo Wine. Una grabación local
+  (botón *Record*) sale a 30 FPS sin cuadros repetidos.
+- **Los menús del escritorio dejan de dibujarse con NVIDIA**: `journalctl -k | grep NVRM`
+  muestra `NV_ERR_NO_MEMORY`. Pasó una vez con un juego con mods que ocupaba casi toda la
+  memoria de video. Cierra TikTok para recuperarlo, sin reiniciar nada.
 - **La fuente Link se queda en blanco**: algunos routers filtran las respuestas de
   DNS que apuntan a `127.0.0.1`. Comprueba `getent hosts lvh.me`; si no imprime nada,
   ejecuta `echo '127.0.0.1 lvh.me' | sudo tee -a /etc/hosts`.

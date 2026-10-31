@@ -1,6 +1,6 @@
 # Maintainer: Joseph <joseph62937@gmail.com>
 pkgname=tiktok-live-studio-wine
-pkgver=1.6.5
+pkgver=1.6.6
 pkgrel=1
 pkgdesc="TikTok LIVE Studio (Windows) en Linux mediante umu-launcher/Proton"
 arch=('x86_64')
@@ -31,8 +31,8 @@ source=('tiktok-live-studio'
         'winex11-screen-capture.patch'
         'LICENSE'
         'COPYING.LIB')
-sha256sums=('832121fcad7eeb5636871d46dd443960427ed6f9fb57393ba17ce10f064b7f52'
-            'c34eb100d2529ecb962bb77dd3416ead1f6f6c0b6de3a6221f784edc695c810b'
+sha256sums=('21553af761d892aaa124cbf91cc3a24b9147db170283ddae09cbd0087fd1f60e'
+            'bd18e4f6f5d968f3a2112cdc38c5f1c56a04929473caf79863051a186ef73a1b'
             '885883c779d6d90d279bf35054169950a70a3fcd76da7f8d2e4c12947fd6e05d'
             '456ef04418a8ce085bfbeb5f0ac3ba06e71382e6bdebccb8653f01a43f3fbf48'
             '8695816749bb38a351b6bd7c44d5fd1d2f6c4c6e80038c9c8e1360ef9c92ac5f'

@@ -2,7 +2,7 @@
 
 Port de TikTok LIVE Studio a Arch con GE-Proton11-11 y umu-launcher. El usuario rechazó
 OBS: el objetivo es que funcione la app de TikTok. El README explica instalación y uso;
-aquí está lo que no se ve en el código y lo que falta. Estado: 1.6.5. Probado en laptop (Ryzen 5 PRO 5650U, Radeon Vega, Hyprland).
+aquí está lo que no se ve en el código y lo que falta. Estado: 1.6.6. Probado en laptop (Ryzen 5 PRO 5650U, Radeon Vega, Hyprland).
 
 Responde siempre en español.
 
@@ -107,6 +107,16 @@ pesan en MediaSDK.
 
 ## Cosas que costó descubrir
 
+- **Tirones de la vista previa:** con 30 cuadros parejos de entrada y GPU al 55 %, la vista
+  previa cambia unas 20 veces por segundo. Una grabación local sale a 30 FPS sin repetidos,
+  así que no son de la captura, de Link, de la GPU ni del juego. Falta medirlo en un LIVE.
+- **NVIDIA:** TikTok con Minecraft con mods llenó la memoria de video (`NV_ERR_NO_MEMORY`,
+  menús de Omarchy sin dibujarse). Se recupera al cerrar TikTok. TikTok solo no lo provocó.
+- **Ventana fuera de pantalla:** con monitores que no empiezan en x=0, Wine la pone donde no
+  hay pantalla y la devuelve si se mueve flotando. `keep_window_visible` la acopla.
+- **`struct.pack_into`** pone en cero la zona antes de escribir: por eso `Shm` usa `words`.
+- **Sin xdotool:** `hl.dsp.cursor.move` mueve el cursor (TikTok reacciona) y un clic por
+  `XTestFakeButtonEvent` de `libXtst` llega a la app; la coordenada X es la de `xrandr`.
 - **El campo Link** rechaza IP, `localhost` y `.localhost`: por eso se usa `lvh.me`.
 - **La página Link** debe terminar de cargar antes de iniciar el video, o TikTok queda gris.
   Un MJPEG caído no da error en `<img>`: el canal `EventSource` `events` reinicia el video.
