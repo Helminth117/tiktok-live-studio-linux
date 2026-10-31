@@ -15,6 +15,7 @@ Link de TikTok, que puede tener varias a la vez:
   <shm>.N.reset    lo crea "tiktok-live-studio cambiar-captura"
   <shm>.N.status   lo que se captura ("pantalla", "ventana", "sin elegir")
   <shm>.N.url      dirección para la fuente Link (ranuras 2 en adelante)
+  <shm>.lock       lo retiene el ayudante en marcha; abrir la app otra vez no crea otro
   <shm>.picking    ranura que está eligiendo y PID de este proceso, para
                    tiktok-live-studio-picker, que recuerda la app en capture.N.class y
                    la elige sola al reabrirla
@@ -31,6 +32,7 @@ Formato de los fotogramas (little endian):
   64 píxeles
 """
 
+import fcntl
 import glob
 import json
 import mmap
@@ -55,6 +57,9 @@ HEADER = 64
 MAX_W, MAX_H = 3840, 2160
 IDLE_TIMEOUT = 15
 STALL_TIMEOUT = 3
+# xdph entrega cuadros aunque nada cambie, así que su silencio es una caída. No se sabe
+# si otros portales hacen lo mismo: ahí una pantalla quieta parecería caída.
+DETECT_STALLS = bool(os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"))
 
 SHM = os.environ.get("TTLS_CAPTURE_SHM", f"/dev/shm/tiktok-live-studio-capture-{os.getuid()}")
 CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "tiktok-live-studio")
@@ -104,6 +109,7 @@ class Shm:
         os.ftruncate(fd, size)
         self.map = mmap.mmap(fd, size)
         os.close(fd)
+        self.capacity = size - HEADER
         self.seq = 0
         struct.pack_into("<IIIIIIII", self.map, 0, MAGIC, 1, 0, 0, 0, 0, 0, 0)
 
@@ -154,8 +160,10 @@ class Capture:
         self.sender = self.bus.get_unique_name()[1:].replace(".", "_")
         self.session = None
         self.pipeline = None
+        self.fd = None
         self.active = False
         self.size = None
+        self.too_big = False
         self.waiting = False    # el portal está preguntando o respondiendo
         self.cancelled = False  # no volver a preguntar hasta cambiar-captura
         self.stalls = 0         # intentos seguidos sin recibir ningún fotograma
@@ -175,7 +183,10 @@ class Capture:
         def on_response(_conn, _sender, _path, _iface, _signal, params):
             self.bus.signal_unsubscribe(sub)
             code, results = params.unpack()
-            callback(code, results)
+            try:
+                callback(code, results)
+            except Exception as err:
+                self.abort(err)
 
         sub = self.bus.signal_subscribe(PORTAL, "org.freedesktop.portal.Request", "Response",
                                         path, None, Gio.DBusSignalFlags.NO_MATCH_RULE, on_response)
@@ -265,8 +276,13 @@ class Capture:
         msg = Gio.DBusMessage.new_method_call(PORTAL, PORTAL_PATH, SCREENCAST, "OpenPipeWireRemote")
         msg.set_body(GLib.Variant("(oa{sv})", (self.session, {})))
         reply = self.bus.send_message_with_reply_sync(msg, Gio.DBusSendMessageFlags.NONE, -1, None)[0]
-        fd = reply.get_unix_fd_list().get(reply.get_body().unpack()[0])
-        self._start_pipeline(fd, self.node)
+        if reply.get_message_type() == Gio.DBusMessageType.ERROR:
+            # La sesión ya no existe; tick() la vuelve a pedir si alguien sigue leyendo.
+            log(f"{self.name}: el portal cerró la sesión: {reply.get_error_name()}")
+            self.stop()
+            return
+        self.fd = reply.get_unix_fd_list().get(reply.get_body().unpack()[0])
+        self._start_pipeline(self.fd, self.node)
 
     def _fail(self, step, code):
         log(f"{self.name}: {step}: el portal respondió {code} (cancelado o denegado)")
@@ -326,7 +342,7 @@ class Capture:
         return Gst.PadProbeReturn.OK
 
     def stalled(self):
-        return self.pipeline and time.monotonic() - self.last_frame > STALL_TIMEOUT
+        return DETECT_STALLS and self.pipeline and time.monotonic() - self.last_frame > STALL_TIMEOUT
 
     def recover(self):
         # xdph deja de entregar fotogramas si la ventana cambia de tamaño, y su proceso
@@ -335,7 +351,7 @@ class Capture:
         self.stalls += 1
         if self.stalls == 1:
             log(f"{self.name}: sin fotogramas; se reconecta el flujo")
-            self.pipeline.set_state(Gst.State.NULL)
+            self._close_pipeline()
             self._open_stream()
             return
         self.stop()
@@ -354,13 +370,16 @@ class Capture:
         sample = sink.emit("pull-sample")
         caps = sample.get_caps().get_structure(0)
         width, height = caps.get_value("width"), caps.get_value("height")
-        if width > MAX_W or height > MAX_H:
-            return Gst.FlowReturn.OK
         buf = sample.get_buffer()
         ok, info = buf.map(Gst.MapFlags.READ)
         if ok:
-            stride = info.size // height
-            self.shm.write(width, height, stride, info.data)
+            # Se mide en bytes: un monitor girado puede ser más alto que MAX_H y aun así caber.
+            if info.size <= self.shm.capacity:
+                stride = info.size // height
+                self.shm.write(width, height, stride, info.data)
+            elif not self.too_big:
+                self.too_big = True
+                log(f"{self.name}: {width}x{height} no cabe en la memoria compartida; no se muestra")
             buf.unmap(info)
         return Gst.FlowReturn.OK
 
@@ -368,10 +387,29 @@ class Capture:
         log("error de GStreamer:", msg.parse_error()[0].message)
         self.stop()
 
-    def stop(self):
+    def _close_pipeline(self):
         if self.pipeline:
+            self.pipeline.get_bus().remove_signal_watch()
             self.pipeline.set_state(Gst.State.NULL)
             self.pipeline = None
+        if self.fd is not None:
+            # pipewiresrc usa una copia, así que este sigue abierto hasta cerrarlo aquí.
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+            self.fd = None
+
+    def abort(self, err):
+        log(f"{self.name}: error inesperado: {err!r}")
+        try:
+            self.stop()
+        except Exception as again:
+            log(f"{self.name}: no se pudo detener: {again!r}")
+        self.active = self.waiting = False
+
+    def stop(self):
+        self._close_pipeline()
         if self.session:
             try:
                 self.bus.call_sync(PORTAL, self.session, "org.freedesktop.portal.Session", "Close",
@@ -434,6 +472,7 @@ class LinkCapture(Capture):
         try:
             with open(secret_file) as f:
                 secret = f.read().strip()
+            os.chmod(secret_file, 0o600)    # las versiones anteriores lo dejaban legible
         except OSError:
             secret = secrets.token_urlsafe(9).replace("-", "a").replace("_", "b")
             os.makedirs(CACHE, exist_ok=True)
@@ -546,10 +585,14 @@ def supervise():
     portal se cae, sin que Python pueda evitarlo. Las capturas se recuperan de lo guardado.
     """
     child = 0
+    launcher = os.getppid()
 
     def forward(signum, _frame):
         if child:
-            os.kill(child, signum)
+            try:
+                os.kill(child, signum)
+            except ProcessLookupError:
+                pass
 
     signal.signal(signal.SIGTERM, forward)
     signal.signal(signal.SIGINT, forward)
@@ -559,7 +602,16 @@ def supervise():
             signal.signal(signal.SIGTERM, signal.SIG_DFL)
             signal.signal(signal.SIGINT, signal.default_int_handler)
             return
-        _pid, status = os.waitpid(child, 0)
+        # Si el lanzador muere sin avisar, no hay que quedarse con el bloqueo.
+        while True:
+            pid, status = os.waitpid(child, os.WNOHANG)
+            if pid:
+                break
+            if os.getppid() != launcher:
+                os.kill(child, signal.SIGTERM)
+                os.waitpid(child, 0)
+                sys.exit(0)
+            time.sleep(1)
         if not os.WIFSIGNALED(status) or os.WTERMSIG(status) in (signal.SIGTERM, signal.SIGINT):
             sys.exit(0)
         log(f"se cayó con la señal {os.WTERMSIG(status)}; se reinicia")
@@ -567,6 +619,15 @@ def supervise():
 
 
 def main():
+    # Los archivos llevan la dirección secreta de cada captura o la imagen de la pantalla.
+    os.umask(0o077)
+    # Antes de limpiar nada: abrir la app otra vez no debe borrar lo del ayudante en marcha.
+    lock = open(SHM + ".lock", "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log("ya hay otro ayudante en marcha")
+        return
     supervise()
     parent = os.getppid()
     Gst.init(None)
@@ -615,10 +676,18 @@ def main():
         for path in glob.glob(glob.escape(SHM) + ".*.request"):
             name = path[len(SHM) + 1:-len(".request")]
             if name not in captures:
-                captures[name] = new_capture(name, bus)
+                try:
+                    captures[name] = new_capture(name, bus)
+                except Exception as err:
+                    log(f"{name}: no se pudo crear la captura: {err!r}")
+                    remove(path)
         waiting = any(c.waiting for c in captures.values())
         for capture in captures.values():
-            capture.tick(waiting)
+            # Una excepción aquí quitaría este temporizador y dejaría todas las capturas sin vigilar.
+            try:
+                capture.tick(waiting)
+            except Exception as err:
+                capture.abort(err)
             waiting = waiting or capture.waiting
         return True
 
