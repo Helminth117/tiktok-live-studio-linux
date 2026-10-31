@@ -2,8 +2,7 @@
 
 Port de TikTok LIVE Studio a Arch con GE-Proton11-11 y umu-launcher. El usuario rechazó
 OBS: el objetivo es que funcione la app de TikTok. El README explica instalación y uso;
-aquí está lo que no se ve en el código y lo que falta. Estado: 1.6.4, commit `12ddcea`
-más este archivo. Probado en laptop (Ryzen 5 PRO 5650U, Radeon Vega, Hyprland).
+aquí está lo que no se ve en el código y lo que falta. Estado: 1.6.5. Probado en laptop (Ryzen 5 PRO 5650U, Radeon Vega, Hyprland).
 
 Responde siempre en español.
 
