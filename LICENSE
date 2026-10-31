@@ -1,4 +1,4 @@
-Launcher, desktop entry, PKGBUILD and tools/ scripts:
+Launcher, capture helper, picker, desktop entries, PKGBUILD and tools/ scripts:
 
 Zero-Clause BSD
 ===============
@@ -14,6 +14,6 @@ RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF
 CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
 CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-mmdevapi.dll and mmdevapi-device-topology.patch are derived from Wine and are
-licensed under the GNU Lesser General Public License, version 2.1 or later;
-see COPYING.LIB.
+mmdevapi.dll, mmdevapi-device-topology.patch, winex11.so and
+winex11-screen-capture.patch are derived from Wine and are licensed under the
+GNU Lesser General Public License, version 2.1 or later; see COPYING.LIB.

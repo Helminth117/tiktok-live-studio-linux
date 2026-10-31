@@ -185,8 +185,9 @@ Needs `clang`, `lld`, `bison`, `flex`, `autoconf` and the X11 headers.
 
 ## License
 
-Launcher, PKGBUILD and scripts: 0BSD. `mmdevapi.dll` and the patch are derived
-from Wine: LGPL-2.1-or-later (see [LICENSE](LICENSE) and [COPYING.LIB](COPYING.LIB)).
+Launcher, capture helper, picker, PKGBUILD and scripts: 0BSD. `mmdevapi.dll`,
+`winex11.so` and their patches are derived from Wine: LGPL-2.1-or-later (see
+[LICENSE](LICENSE) and [COPYING.LIB](COPYING.LIB)).
 
 ---
 

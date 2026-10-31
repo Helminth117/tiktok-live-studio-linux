@@ -28,7 +28,9 @@ source=('tiktok-live-studio'
         'mmdevapi.dll'
         'mmdevapi-device-topology.patch'
         'winex11.so'
-        'winex11-screen-capture.patch')
+        'winex11-screen-capture.patch'
+        'LICENSE'
+        'COPYING.LIB')
 sha256sums=('a6494660da65ba16b7fa5690dc7b1deda80e235185f78be3bda21ab338bfef62'
             '799e160bc4f10e1412803f52032666b5855186e37256e26c47a0d59b590d6920'
             '816443a198dc73e7cf9cba0c7a18df95c71ae6f2ae7e70a9e324fa6c4871cf9b'
@@ -39,7 +41,9 @@ sha256sums=('a6494660da65ba16b7fa5690dc7b1deda80e235185f78be3bda21ab338bfef62'
             '668fb71bc5bc7599301f6bde780188aa0c4b6f2e1f74ce15fc183d1650fb2e15'
             '5c17760dfa02a772b1c4963cbe412345e1ff726390f63012d161eb3f3be09144'
             'c66977cdd1b39ff64a90d9771409726c94573732894ddd6cb4763faf165424e2'
-            '55f83f9ba2bb1fb5728418cb09dcf33ef9787c413ee2704e452e041cf6f32351')
+            '55f83f9ba2bb1fb5728418cb09dcf33ef9787c413ee2704e452e041cf6f32351'
+            'd96b03bc7c276da218bd31dea3aa445b10afaf184396ef824bf6739fd018f29b'
+            'e237fa56668030e928551ddd60f05df5fe957f75eab874bbd017e085ed722e7c')
 
 package() {
   install -Dm755 tiktok-live-studio "$pkgdir/usr/bin/tiktok-live-studio"
@@ -53,4 +57,6 @@ package() {
   install -Dm644 mmdevapi-device-topology.patch "$pkgdir/usr/share/tiktok-live-studio/mmdevapi-device-topology.patch"
   install -Dm644 winex11.so "$pkgdir/usr/share/tiktok-live-studio/winex11.so"
   install -Dm644 winex11-screen-capture.patch "$pkgdir/usr/share/tiktok-live-studio/winex11-screen-capture.patch"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 COPYING.LIB "$pkgdir/usr/share/licenses/$pkgname/COPYING.LIB"
 }
